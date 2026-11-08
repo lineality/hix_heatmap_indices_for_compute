@@ -137,7 +137,7 @@ Note: '--out-dir' must NOT already exist (HIX never overwrites: code 510). Use a
 ```
 cargo run --release -- \
   --lcov /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/run_005_pumpkin.lcov \
-  --out-dir /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_009_distribution_shape \
+  --out-dir /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_0010_distribution_shape \
   --top-n 15
 ```
 
@@ -145,8 +145,8 @@ cargo run --release -- \
 
 TXT->x
 ```
-rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_009_distribution_shape/hix_report.txt \
-        > /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_009_distribution_shape/hix_report.demangled.txt
+rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_0010_distribution_shape/hix_report.txt \
+        > /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_0010_distribution_shape/hix_report.demangled.txt
 ```
 
 TSV->

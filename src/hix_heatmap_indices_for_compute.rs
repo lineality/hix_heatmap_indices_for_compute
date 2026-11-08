@@ -204,7 +204,7 @@
 //! Codes 801-816 are used; 817-849 are reserved for the matching config
 //! writer. Numbers range from 800-849 so that they may often be kept
 //! unchanged when this module is merged into a parent project in development.
-//! The table is in the `ReadTomlFieldError` doc comment.
+//! The table is in the `HeatmapError` doc comment.
 //!
 //! ## Modes
 //! - Production-release: never panics, never allocates; errors are 2-byte codes;
@@ -424,6 +424,12 @@ pub enum HeatmapError {
     TypeWorkUnitsCorrupted = 161,
     TypeWorkUnitNameInvalid = 162,
     TypeWorkUnitNameCorrupted = 163,
+    TypeScenarioNameInvalid = 164,
+    TypeScenarioNameCorrupted = 165,
+    TypeCargoBinaryNameInvalid = 166,
+    TypeCargoBinaryNameCorrupted = 167,
+    TypeAnalysisPurposeInvalid = 168,
+    TypeAnalysisPurposeCorrupted = 169,
 
     // 200–299: LCOV input
     LcovOpenNotFound = 201,
@@ -497,7 +503,6 @@ pub enum HeatmapError {
 
     // 800-849: TOML/Config file read/write
     // 800-816: for toml/config writer reader
-    // 817-849: for the toml/config writer
     // Functionality: Read Single Line Field = RSLF
     RSLFEmptyKey = 801,
     RSLFOutputBufferZeroSized = 802,
@@ -515,6 +520,28 @@ pub enum HeatmapError {
     RSLFKeyMatchIndexInvalid = 814,
     RSLFScanOutcomeMismatch = 815,
     RSLFDuplicateKey = 816,
+
+    // 817–849: HIX config files (values, write, read-back, load)
+    CfgPathNotAbsolute = 817,
+    CfgPathValueInvalid = 818,
+    CfgPathValueCorrupted = 819,
+    CfgRenderBufferFull = 820,
+    CfgWriteOpenNotFound = 821,
+    CfgWriteOpenPermissionDenied = 822,
+    CfgWriteOpenTransient = 823,
+    CfgWriteOpenAlreadyExists = 824,
+    CfgWriteOpenOther = 825,
+    CfgWriteFailed = 826,
+    CfgSyncFailed = 827,
+    CfgRoundTripMismatch = 828,
+    CfgValueLengthInvalid = 829,
+    CfgValueNotUtf8 = 830,
+    CfgVersionNotANumber = 831,
+    CfgUnsupportedVersion = 832,
+    CfgTopNInvalid = 833,
+    CfgBooleanInvalid = 834,
+    CfgWorkUnitNameInvalid = 835,
+    CfgRenderedRangeInvalid = 836,
 }
 
 impl HeatmapError {
@@ -530,6 +557,7 @@ impl HeatmapError {
             HeatmapError::RSLFOpenTransient
             | HeatmapError::LcovOpenTransient
             | HeatmapError::SrcOpenTransient
+            | HeatmapError::CfgWriteOpenTransient
             | HeatmapError::RptOpenTransient => true,
 
             HeatmapError::AnaCoCountRunInvalid
@@ -631,7 +659,32 @@ impl HeatmapError {
             | HeatmapError::RSLFValueUnterminatedAtEndOfFile
             | HeatmapError::RSLFKeyMatchIndexInvalid
             | HeatmapError::RSLFScanOutcomeMismatch
-            | HeatmapError::RSLFDuplicateKey => false,
+            | HeatmapError::RSLFDuplicateKey
+            | HeatmapError::TypeScenarioNameInvalid
+            | HeatmapError::TypeScenarioNameCorrupted
+            | HeatmapError::TypeCargoBinaryNameInvalid
+            | HeatmapError::TypeCargoBinaryNameCorrupted
+            | HeatmapError::TypeAnalysisPurposeInvalid
+            | HeatmapError::TypeAnalysisPurposeCorrupted
+            | HeatmapError::CfgPathNotAbsolute
+            | HeatmapError::CfgPathValueInvalid
+            | HeatmapError::CfgPathValueCorrupted
+            | HeatmapError::CfgRenderBufferFull
+            | HeatmapError::CfgWriteOpenNotFound
+            | HeatmapError::CfgWriteOpenPermissionDenied
+            | HeatmapError::CfgWriteOpenAlreadyExists
+            | HeatmapError::CfgWriteOpenOther
+            | HeatmapError::CfgWriteFailed
+            | HeatmapError::CfgSyncFailed
+            | HeatmapError::CfgRoundTripMismatch
+            | HeatmapError::CfgValueLengthInvalid
+            | HeatmapError::CfgValueNotUtf8
+            | HeatmapError::CfgVersionNotANumber
+            | HeatmapError::CfgUnsupportedVersion
+            | HeatmapError::CfgTopNInvalid
+            | HeatmapError::CfgBooleanInvalid
+            | HeatmapError::CfgWorkUnitNameInvalid
+            | HeatmapError::CfgRenderedRangeInvalid => false,
         }
     }
 
@@ -822,6 +875,59 @@ impl std::fmt::Display for HeatmapError {
                 "scan returned the other goal's result (internal invariant)"
             }
             HeatmapError::RSLFDuplicateKey => "a checked key is assigned on more than one line",
+            HeatmapError::TypeScenarioNameInvalid => {
+                "scenario name must be 1..=MAX_SCENARIO_NAME_BYTES of A-Z a-z 0-9 _ - ."
+            }
+            HeatmapError::TypeScenarioNameCorrupted => "ScenarioName failed validity recheck",
+            HeatmapError::TypeCargoBinaryNameInvalid => {
+                "binary name must be 1..=MAX_CARGO_BINARY_NAME_BYTES of A-Z a-z 0-9 _ - ."
+            }
+            HeatmapError::TypeCargoBinaryNameCorrupted => "CargoBinaryName failed validity recheck",
+            HeatmapError::TypeAnalysisPurposeInvalid => {
+                "analysis purpose must be 1..=MAX_ANALYSIS_PURPOSE_BYTES of A-Z a-z 0-9 _ - ."
+            }
+            HeatmapError::TypeAnalysisPurposeCorrupted => "AnalysisPurpose failed validity recheck",
+            HeatmapError::CfgPathNotAbsolute => "config path value is not absolute",
+            HeatmapError::CfgPathValueInvalid => {
+                "config path value is empty, not UTF-8, longer than MAX_CONFIG_PATH_BYTES, \
+                             or contains a double quote, backslash, or control character"
+            }
+            HeatmapError::CfgPathValueCorrupted => "ConfigPath failed validity recheck",
+            HeatmapError::CfgRenderBufferFull => {
+                "config text does not fit in CONFIG_FILE_MAX_BYTES (internal invariant)"
+            }
+            HeatmapError::CfgWriteOpenNotFound => {
+                "config file directory not found (create config_files/ first)"
+            }
+            HeatmapError::CfgWriteOpenPermissionDenied => "config file create: permission denied",
+            HeatmapError::CfgWriteOpenTransient => {
+                "config file create: transient error (retries exhausted)"
+            }
+            HeatmapError::CfgWriteOpenAlreadyExists => {
+                "config file already exists; refusing to overwrite"
+            }
+            HeatmapError::CfgWriteOpenOther => "config file create failed",
+            HeatmapError::CfgWriteFailed => "writing config file failed",
+            HeatmapError::CfgSyncFailed => "syncing config file to disk failed",
+            HeatmapError::CfgRoundTripMismatch => {
+                "config file read back differs from what was written (internal invariant)"
+            }
+            HeatmapError::CfgValueLengthInvalid => {
+                "field reader returned a length beyond its buffer (internal invariant)"
+            }
+            HeatmapError::CfgValueNotUtf8 => "config value is not UTF-8",
+            HeatmapError::CfgVersionNotANumber => "hix_config_version is not a number",
+            HeatmapError::CfgUnsupportedVersion => {
+                "hix_config_version is not CONFIG_FORMAT_VERSION of this HIX"
+            }
+            HeatmapError::CfgTopNInvalid => "config top_n is not a number in 1..=MAX_TOP_N",
+            HeatmapError::CfgBooleanInvalid => "config boolean value is not true or false",
+            HeatmapError::CfgWorkUnitNameInvalid => {
+                "config work_unit_name must be 1..=MAX_WORK_UNIT_NAME_BYTES of A-Z a-z 0-9 _ - ."
+            }
+            HeatmapError::CfgRenderedRangeInvalid => {
+                "rendered config length is outside its buffer (internal invariant)"
+            }
         };
         write!(formatter, "HIX-{}: {}", self.code(), description)
     }
@@ -2021,6 +2127,1045 @@ mod read_toml_single_line_field_no_heap_tests {
 }
 
 // ============================================================================
+// HIX config files (run configuration in the TOML subset)
+// ============================================================================
+//
+// A config file holds what is needed to repeat a run. It is written by the
+// wizard (create-new, never overwritten), then read back and compared, and
+// it is read by the wizard and by automated replay. Each field is read with
+// `read_single_line_field_from_toml_no_heap` (no heap).
+//
+// File layout (exactly as written by `render_config_file_text`):
+//   # two comment lines
+//   hix_config_version = 1
+//   target_crate_path = "/ABSOLUTE/path/to/target/crate"
+//   target_binary_name = "pumpkin"
+//   modeling_data_path = "/ABSOLUTE/path/to/modeling_data"
+//   scenario_name = "pumpkin_world_spawn"
+//   analysis_purpose = "count_baseline"
+//   top_n = 20
+//   work_unit_name = "chunks_generated"     <- line omitted when not set
+//   demangle_outputs = true
+//
+// Reading rules (`load_config_file`):
+// - Each known key may appear at most once (816).
+// - `hix_config_version` must equal `CONFIG_FORMAT_VERSION` (831, 832).
+// - Every key except `work_unit_name` is required (811 if missing).
+// - Unknown keys are ignored: the field reader looks up known keys only.
+// - Numbers and booleans may have spaces around them; quoted values are
+//   taken exactly as written.
+//
+// The work-unit COUNT is not stored here: it is a result of each run, entered
+// after the run, and belongs in that run's record.
+
+/// Format version written to and required from every config file.
+/// Raise it when a change to keys or their meaning would make an older HIX
+/// misread a newer file (or the reverse); an unequal version is refused (832).
+const CONFIG_FORMAT_VERSION: u32 = 1;
+
+/// Longest path value accepted in a config file, in bytes.
+///
+/// 4096 is the Linux `PATH_MAX`. If a longer path is ever needed, raise this
+/// constant; the config render buffer (`CONFIG_FILE_MAX_BYTES`) and the
+/// path-read buffer (this constant, as a const generic) follow it
+/// automatically. Both are stack arrays.
+const MAX_CONFIG_PATH_BYTES: usize = 4096;
+
+/// Stack buffer for rendering one config file: the two path values at their
+/// maximum length plus a fixed allowance for comments, keys, and the short
+/// fields. The test `cfg_write_new_config_file_longest_values_round_trip`
+/// renders a config with every field at its maximum length.
+const CONFIG_FILE_MAX_BYTES: usize = 2 * MAX_CONFIG_PATH_BYTES + 4096;
+
+/// Stack buffer for reading short config values (names, numbers, booleans).
+/// At least as long as every short field's maximum (compile-time check below).
+const CONFIG_SHORT_VALUE_BUFFER_BYTES: usize = 128;
+
+/// Longest scenario name (the `<scenario>` in `run_NNN_<scenario>`).
+const MAX_SCENARIO_NAME_BYTES: usize = 96;
+
+/// Longest cargo binary name (passed to `--bin`; cargo validates it further).
+const MAX_CARGO_BINARY_NAME_BYTES: usize = 64;
+
+/// Longest analysis purpose (the `<purpose>` in `analysis_NNN_<purpose>`).
+const MAX_ANALYSIS_PURPOSE_BYTES: usize = 64;
+
+// Compile-time guard: a run folder name `run_NNNN_<scenario>` (run numbers
+// up to 9999) fits in a run label, so the folder name can be passed to the
+// analysis as `--run-label` unchanged.
+const _: () = assert!("run_9999_".len() + MAX_SCENARIO_NAME_BYTES <= MAX_RUN_LABEL_BYTES);
+
+// Compile-time guard: the short-value read buffer holds every short field at
+// its maximum, so an over-long hand-edited name reaches its own type's check.
+const _: () = assert!(
+    CONFIG_SHORT_VALUE_BUFFER_BYTES >= MAX_SCENARIO_NAME_BYTES
+        && CONFIG_SHORT_VALUE_BUFFER_BYTES >= MAX_CARGO_BINARY_NAME_BYTES
+        && CONFIG_SHORT_VALUE_BUFFER_BYTES >= MAX_ANALYSIS_PURPOSE_BYTES
+        && CONFIG_SHORT_VALUE_BUFFER_BYTES >= MAX_WORK_UNIT_NAME_BYTES
+);
+
+/// Config file names: `hix_<scenario>.toml`.
+const CONFIG_FILE_NAME_PREFIX: &str = "hix_";
+const CONFIG_FILE_NAME_SUFFIX: &str = ".toml";
+
+/// Config keys (the only place each key's text is written).
+const CONFIG_KEY_FORMAT_VERSION: &str = "hix_config_version";
+const CONFIG_KEY_TARGET_CRATE_PATH: &str = "target_crate_path";
+const CONFIG_KEY_TARGET_BINARY_NAME: &str = "target_binary_name";
+const CONFIG_KEY_MODELING_DATA_PATH: &str = "modeling_data_path";
+const CONFIG_KEY_SCENARIO_NAME: &str = "scenario_name";
+const CONFIG_KEY_ANALYSIS_PURPOSE: &str = "analysis_purpose";
+const CONFIG_KEY_TOP_N: &str = "top_n";
+const CONFIG_KEY_WORK_UNIT_NAME: &str = "work_unit_name";
+const CONFIG_KEY_DEMANGLE_OUTPUTS: &str = "demangle_outputs";
+
+/// Number of config keys.
+const CONFIG_KEY_COUNT: usize = 9;
+
+/// Every config key: checked for duplicates before any field is read.
+/// The test `cfg_render_config_file_text_writes_every_key_once` keeps this
+/// list and the writer in step.
+const CONFIG_KEYS: [&str; CONFIG_KEY_COUNT] = [
+    CONFIG_KEY_FORMAT_VERSION,
+    CONFIG_KEY_TARGET_CRATE_PATH,
+    CONFIG_KEY_TARGET_BINARY_NAME,
+    CONFIG_KEY_MODELING_DATA_PATH,
+    CONFIG_KEY_SCENARIO_NAME,
+    CONFIG_KEY_ANALYSIS_PURPOSE,
+    CONFIG_KEY_TOP_N,
+    CONFIG_KEY_WORK_UNIT_NAME,
+    CONFIG_KEY_DEMANGLE_OUTPUTS,
+];
+
+/// Open-error codes for creating a config file (create-new: never overwrites).
+const CONFIG_WRITE_OPEN_ERROR_CODES: OpenErrorCodes = OpenErrorCodes {
+    not_found: HeatmapError::CfgWriteOpenNotFound,
+    permission_denied: HeatmapError::CfgWriteOpenPermissionDenied,
+    transient: HeatmapError::CfgWriteOpenTransient,
+    already_exists: HeatmapError::CfgWriteOpenAlreadyExists,
+    other: HeatmapError::CfgWriteOpenOther,
+};
+
+// ----------------------------------------------------------------------------
+// Short names: one rule, one type per meaning, unique codes per kind
+// ----------------------------------------------------------------------------
+
+/// Rules for one kind of short name used in config files and folder names.
+///
+/// Every kind uses the run-label character rule (`is_valid_metadata_text`:
+/// 1..=max bytes of `A-Z a-z 0-9 _ - .`). So a name is safe as a quoted
+/// config value (no quotes or backslashes), in the report and TSV, and as
+/// part of a folder name. Kinds differ only in maximum length and in their
+/// error codes, which stay unique per kind so a code points at its field.
+pub trait NameTextKind {
+    /// Longest accepted name, in bytes (ASCII only, so also characters).
+    const MAX_BYTES: usize;
+    /// Returned by `NameText::new` for a name that breaks the rule (input validation).
+    const INVALID_CODE: HeatmapError;
+    /// Returned by `NameText::get` when a stored name fails its recheck (internal invariant).
+    const CORRUPTED_CODE: HeatmapError;
+    /// Field name, used only by debug-build diagnostics.
+    const FIELD_LABEL: &'static str;
+}
+
+/// Kind marker: scenario name (`run_NNN_<scenario>`, `hix_<scenario>.toml`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScenarioNameKind;
+
+impl NameTextKind for ScenarioNameKind {
+    const MAX_BYTES: usize = MAX_SCENARIO_NAME_BYTES;
+    const INVALID_CODE: HeatmapError = HeatmapError::TypeScenarioNameInvalid;
+    const CORRUPTED_CODE: HeatmapError = HeatmapError::TypeScenarioNameCorrupted;
+    const FIELD_LABEL: &'static str = "scenario name";
+}
+
+/// Kind marker: cargo binary name (`cargo llvm-cov run --bin <name>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CargoBinaryNameKind;
+
+impl NameTextKind for CargoBinaryNameKind {
+    const MAX_BYTES: usize = MAX_CARGO_BINARY_NAME_BYTES;
+    const INVALID_CODE: HeatmapError = HeatmapError::TypeCargoBinaryNameInvalid;
+    const CORRUPTED_CODE: HeatmapError = HeatmapError::TypeCargoBinaryNameCorrupted;
+    const FIELD_LABEL: &'static str = "cargo binary name";
+}
+
+/// Kind marker: analysis purpose (`analysis_NNN_<purpose>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalysisPurposeKind;
+
+impl NameTextKind for AnalysisPurposeKind {
+    const MAX_BYTES: usize = MAX_ANALYSIS_PURPOSE_BYTES;
+    const INVALID_CODE: HeatmapError = HeatmapError::TypeAnalysisPurposeInvalid;
+    const CORRUPTED_CODE: HeatmapError = HeatmapError::TypeAnalysisPurposeCorrupted;
+    const FIELD_LABEL: &'static str = "analysis purpose";
+}
+
+/// A short name of kind `K`, validated on construction and rechecked on read.
+/// Use the aliases `ScenarioName`, `CargoBinaryName`, `AnalysisPurpose`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameText<K: NameTextKind> {
+    name_text: String,
+    kind: PhantomData<K>,
+}
+
+/// Scenario name, e.g. `pumpkin_world_spawn`.
+pub type ScenarioName = NameText<ScenarioNameKind>;
+/// Cargo binary name, e.g. `pumpkin`.
+pub type CargoBinaryName = NameText<CargoBinaryNameKind>;
+/// Analysis purpose, e.g. `count_baseline`.
+pub type AnalysisPurpose = NameText<AnalysisPurposeKind>;
+
+impl<K: NameTextKind> NameText<K> {
+    /// Validates and constructs.
+    ///
+    /// # Returns
+    /// - `Ok(NameText)`.
+    /// - `Err(K::INVALID_CODE)` (input validation: names come from the user or
+    ///   from a hand-editable config file): empty, longer than `K::MAX_BYTES`,
+    ///   or a byte outside `A-Z a-z 0-9 _ - .`.
+    ///
+    /// # Modes
+    /// Debug builds print the field and the rejected text.
+    pub fn ntk_new(candidate_text: &str) -> Result<Self, HeatmapError> {
+        if !is_valid_metadata_text(candidate_text, K::MAX_BYTES) {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: invalid {} {:?} (1..={} of A-Z a-z 0-9 _ - .)",
+                K::INVALID_CODE.code(),
+                K::FIELD_LABEL,
+                candidate_text,
+                K::MAX_BYTES
+            );
+            return Err(K::INVALID_CODE);
+        }
+        Ok(Self {
+            name_text: candidate_text.to_string(),
+            kind: PhantomData,
+        })
+    }
+
+    /// Returns the name after rechecking it.
+    ///
+    /// # Returns
+    /// - `Ok(&str)`.
+    /// - `Err(K::CORRUPTED_CODE)` (internal invariant: `new` already checked
+    ///   the same rule, so a failure here means corrupted memory or a value
+    ///   built without `new`).
+    pub fn ntk_get(&self) -> Result<&str, HeatmapError> {
+        if !is_valid_metadata_text(&self.name_text, K::MAX_BYTES) {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: {} corrupted",
+                K::CORRUPTED_CODE.code(),
+                K::FIELD_LABEL
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: {} recheck failed",
+                K::CORRUPTED_CODE.code(),
+                K::FIELD_LABEL
+            );
+            return Err(K::CORRUPTED_CODE);
+        }
+        Ok(self.name_text.as_str())
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Path values 1
+// ----------------------------------------------------------------------------
+
+/// True if `candidate_text` can be stored as a quoted config value and read
+/// back unchanged: 1..=`MAX_CONFIG_PATH_BYTES` bytes, with no `"` (would end
+/// the value), no `\` (an escape in real TOML; refused so files stay valid
+/// TOML), and no control bytes (0x00-0x1F, 0x7F; a newline would split the line).
+/// Non-ASCII UTF-8 is allowed.
+fn is_valid_config_path_text(candidate_text: &str) -> bool {
+    !candidate_text.is_empty()
+        && candidate_text.len() <= MAX_CONFIG_PATH_BYTES
+        && candidate_text
+            .bytes()
+            .all(|byte| byte != b'"' && byte != b'\\' && byte >= 0x20 && byte != 0x7F)
+}
+
+/// An absolute path that can be written to a config file and read back
+/// unchanged (see `is_valid_config_path_text`). Stored as text, because a
+/// config file is text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigPath {
+    path_text: String,
+}
+
+impl ConfigPath {
+    /// Validates and constructs.
+    ///
+    /// # Returns
+    /// - `Ok(ConfigPath)`.
+    /// - `Err(CfgPathValueInvalid)` (input validation): not UTF-8, empty,
+    ///   too long, or contains `"`, `\`, or a control byte.
+    /// - `Err(CfgPathNotAbsolute)` (input validation).
+    ///
+    /// # Modes
+    /// Debug builds print the rejected path.
+    pub fn cp_new(candidate_path: &Path) -> Result<Self, HeatmapError> {
+        let candidate_text = match candidate_path.to_str() {
+            Some(text) => text,
+            None => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: config path is not UTF-8: {}",
+                    HeatmapError::CfgPathValueInvalid.code(),
+                    candidate_path.display()
+                );
+                return Err(HeatmapError::CfgPathValueInvalid);
+            }
+        };
+        if !candidate_path.is_absolute() {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: config path is not absolute: {:?}",
+                HeatmapError::CfgPathNotAbsolute.code(),
+                candidate_text
+            );
+            return Err(HeatmapError::CfgPathNotAbsolute);
+        }
+        if !is_valid_config_path_text(candidate_text) {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: config path not storable ({} bytes; max {}; no \" \\ or control bytes): {:?}",
+                HeatmapError::CfgPathValueInvalid.code(),
+                candidate_text.len(),
+                MAX_CONFIG_PATH_BYTES,
+                candidate_text
+            );
+            return Err(HeatmapError::CfgPathValueInvalid);
+        }
+        Ok(Self {
+            path_text: candidate_text.to_string(),
+        })
+    }
+
+    /// Returns the path text after rechecking it (used by the config writer).
+    ///
+    /// # Returns
+    /// - `Ok(&str)`.
+    /// - `Err(CfgPathValueCorrupted)` (internal invariant: `new` checked the same rules).
+    pub fn cp_get_text(&self) -> Result<&str, HeatmapError> {
+        let is_intact =
+            is_valid_config_path_text(&self.path_text) && Path::new(&self.path_text).is_absolute();
+        if !is_intact {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: ConfigPath corrupted",
+                HeatmapError::CfgPathValueCorrupted.code()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: ConfigPath recheck failed",
+                HeatmapError::CfgPathValueCorrupted.code()
+            );
+            return Err(HeatmapError::CfgPathValueCorrupted);
+        }
+        Ok(self.path_text.as_str())
+    }
+
+    /// Returns the path after rechecking it. Same errors as `get_text`.
+    pub fn cp_get(&self) -> Result<&Path, HeatmapError> {
+        Ok(Path::new(self.cp_get_text()?))
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Path values 2
+// ----------------------------------------------------------------------------
+
+/// True if `candidate_text` can be written as a quoted config value and read
+/// back byte for byte by the config field reader.
+///
+/// This checks the characters of the path itself. It does not touch the
+/// filesystem: the path need not exist.
+///
+/// Rules, and why each exists:
+/// - 1..=`MAX_CONFIG_PATH_BYTES` bytes: the read buffer for path fields has
+///   exactly this size, so a longer value would be refused when read.
+/// - no `"`: it would end the quoted value early.
+/// - no `\`: an escape character in real TOML. Refused so the file stays
+///   valid TOML and any other TOML tool reads the same value.
+/// - no control bytes (0x00-0x1F, 0x7F): a newline would split the line;
+///   the others cannot be seen or typed in a hand-edited file.
+///
+/// Non-ASCII UTF-8 is allowed; the reader copies it byte for byte.
+fn is_storable_config_field_path_text(candidate_text: &str) -> bool {
+    !candidate_text.is_empty()
+        && candidate_text.len() <= MAX_CONFIG_PATH_BYTES
+        && candidate_text
+            .bytes()
+            .all(|byte| byte != b'"' && byte != b'\\' && byte >= 0x20 && byte != 0x7F)
+}
+
+/// An absolute filesystem path stored as a field VALUE inside a config file
+/// (`target_crate_path`, `modeling_data_path`).
+///
+/// Not the path OF a config file: that is an `AbsolutePath`, passed to
+/// `write_new_config_file` and `load_config_file`.
+///
+/// # Project context
+/// A config file is text, so this type stores the path as UTF-8 text that
+/// satisfies `is_storable_config_field_path_text`. Any value of this type can
+/// therefore be written to a config file and read back unchanged. Nothing is
+/// opened or checked on disk: whether the path exists is checked by the step
+/// that uses it (e.g. running cargo in the target crate).
+///
+/// One accessor, `get_path_str`, so the value has one name and one recheck.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigFieldPath {
+    /// The path's own characters, e.g. `/home/user/code/Pumpkin`.
+    field_path_text: String,
+}
+
+impl ConfigFieldPath {
+    /// Validates and constructs.
+    ///
+    /// # Arguments
+    /// - `candidate_path`: from the user (wizard), from the working directory,
+    ///   or from a config file being loaded.
+    ///
+    /// # Returns
+    /// - `Ok(ConfigFieldPath)`.
+    /// - `Err(CfgPathValueInvalid)` (input validation): not UTF-8, empty,
+    ///   longer than `MAX_CONFIG_PATH_BYTES`, or contains `"`, `\`, or a control byte.
+    /// - `Err(CfgPathNotAbsolute)` (input validation).
+    ///
+    /// # Modes
+    /// Debug builds print the rejected path. Production-release returns the code only.
+    pub fn new(candidate_path: &Path) -> Result<Self, HeatmapError> {
+        let candidate_text = match candidate_path.to_str() {
+            Some(text) => text,
+            None => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: config field path is not UTF-8: {}",
+                    HeatmapError::CfgPathValueInvalid.code(),
+                    candidate_path.display()
+                );
+                return Err(HeatmapError::CfgPathValueInvalid);
+            }
+        };
+
+        // --- Check: path is absolute ---
+        // input validation: paths come from the user or a hand-editable file.
+        if !candidate_path.is_absolute() {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: config field path is not absolute: {:?}",
+                HeatmapError::CfgPathNotAbsolute.code(),
+                candidate_text
+            );
+            return Err(HeatmapError::CfgPathNotAbsolute);
+        }
+
+        // --- Check: path text can be stored and read back unchanged ---
+        // input validation: see `is_storable_config_field_path_text`.
+        if !is_storable_config_field_path_text(candidate_text) {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: config field path not storable ({} bytes, max {}; no \" \\ or control bytes): {:?}",
+                HeatmapError::CfgPathValueInvalid.code(),
+                candidate_text.len(),
+                MAX_CONFIG_PATH_BYTES,
+                candidate_text
+            );
+            return Err(HeatmapError::CfgPathValueInvalid);
+        }
+
+        Ok(Self {
+            field_path_text: candidate_text.to_string(),
+        })
+    }
+
+    /// Returns the stored path itself, as `&str`, after rechecking it.
+    ///
+    /// This returns the characters of the path (e.g. `/home/user/code/Pumpkin`),
+    /// not the contents of any file: no file is opened or read. Callers that
+    /// need a `&Path` wrap the result: `Path::new(field_path.get_path_str()?)`.
+    ///
+    /// # Returns
+    /// - `Ok(&str)`.
+    /// - `Err(CfgPathValueCorrupted)` (internal invariant): `new` checked the
+    ///   same rules, so a failure means the stored value changed after
+    ///   construction (e.g. memory corruption) or was built without `new`.
+    ///
+    /// # Modes
+    /// Debug builds (not test) panic via `debug_assert!`; test and debug builds
+    /// print; production-release returns the code only.
+    pub fn get_path_str(&self) -> Result<&str, HeatmapError> {
+        // --- Check: stored path still satisfies the construction rules ---
+        // internal invariant: only `new` creates values, with these same checks.
+        let is_intact = is_storable_config_field_path_text(&self.field_path_text)
+            && Path::new(&self.field_path_text).is_absolute();
+        if !is_intact {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: ConfigFieldPath corrupted",
+                HeatmapError::CfgPathValueCorrupted.code()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: ConfigFieldPath recheck failed",
+                HeatmapError::CfgPathValueCorrupted.code()
+            );
+            return Err(HeatmapError::CfgPathValueCorrupted);
+        }
+        Ok(self.field_path_text.as_str())
+    }
+}
+
+// ----------------------------------------------------------------------------
+// The config
+// ----------------------------------------------------------------------------
+
+/// Everything needed to repeat a run (one config file).
+///
+/// Every field is an enforced type, so a `HixConfig` that exists can always
+/// be written and read back unchanged. New fields: add a key constant, add
+/// it to `CONFIG_KEYS`, write it in `write_config_lines`, read it in
+/// `load_config_file`, and consider raising `CONFIG_FORMAT_VERSION`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HixConfig {
+    /// Crate directory where cargo commands for the target run.
+    target_crate_path: ConfigPath,
+    /// Binary to run (`--bin`); required for workspaces with several binaries.
+    target_binary_name: CargoBinaryName,
+    /// Directory holding the `run_NNN_<scenario>` folders.
+    modeling_data_path: ConfigPath,
+    /// Scenario: names the run folders and this config file.
+    scenario_name: ScenarioName,
+    /// Purpose of the analysis made after each run (`analysis_NNN_<purpose>`).
+    analysis_purpose: AnalysisPurpose,
+    /// Rows per Top-N table in the report.
+    top_n: TopNCount,
+    /// Name of the work unit (e.g. `chunks_generated`); the count is per run.
+    work_unit_name: Option<WorkUnitName>,
+    /// Also write `rustfilt`-demangled copies of the report and TSV.
+    demangle_outputs: bool,
+}
+
+/// Config file name for a scenario: `hix_<scenario>.toml`.
+///
+/// # Returns
+/// - `Ok(file_name)`.
+/// - `Err(TypeScenarioNameCorrupted)` from the name's recheck.
+fn config_file_name_for_scenario(scenario_name: &ScenarioName) -> Result<String, HeatmapError> {
+    let scenario_text = scenario_name.ntk_get()?;
+    let name_length = CONFIG_FILE_NAME_PREFIX
+        .len()
+        .saturating_add(scenario_text.len())
+        .saturating_add(CONFIG_FILE_NAME_SUFFIX.len());
+    let mut file_name = String::with_capacity(name_length);
+    file_name.push_str(CONFIG_FILE_NAME_PREFIX);
+    file_name.push_str(scenario_text);
+    file_name.push_str(CONFIG_FILE_NAME_SUFFIX);
+    Ok(file_name)
+}
+
+// ----------------------------------------------------------------------------
+// Writing
+// ----------------------------------------------------------------------------
+
+/// Maps a failed write into the render buffer to its code.
+///
+/// Internal invariant: `CONFIG_FILE_MAX_BYTES` holds a config with every field
+/// at its maximum (checked by test), so this happens only with a smaller
+/// buffer (tests) or after a key or field was added without raising the size.
+fn config_render_error(_io_error: std::io::Error) -> HeatmapError {
+    #[cfg(all(debug_assertions, not(test)))]
+    debug_assert!(
+        false,
+        "HIX-{}: config render buffer full: {}",
+        HeatmapError::CfgRenderBufferFull.code(),
+        _io_error
+    );
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "HIX-{}: config render buffer full: {}",
+        HeatmapError::CfgRenderBufferFull.code(),
+        _io_error
+    );
+    HeatmapError::CfgRenderBufferFull
+}
+
+/// Writes the config file lines (the layout in the section comment above).
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(CfgRenderBufferFull)` from `config_render_error`.
+/// - `Err` from a field's recheck (`CfgPathValueCorrupted`, `Type*Corrupted`).
+fn write_config_lines<W: Write>(
+    config_writer: &mut W,
+    config: &HixConfig,
+) -> Result<(), HeatmapError> {
+    writeln!(
+        config_writer,
+        "# HIX config file (TOML subset: one `key = value` per line, top level only)."
+    )
+    .map_err(config_render_error)?;
+    writeln!(
+        config_writer,
+        "# Written by HIX. Hand edits are allowed; values may not contain double quotes or backslashes."
+    )
+    .map_err(config_render_error)?;
+    writeln!(
+        config_writer,
+        "{} = {}",
+        CONFIG_KEY_FORMAT_VERSION, CONFIG_FORMAT_VERSION
+    )
+    .map_err(config_render_error)?;
+    writeln!(
+        config_writer,
+        "{} = \"{}\"",
+        CONFIG_KEY_TARGET_CRATE_PATH,
+        config.target_crate_path.cp_get_text()?
+    )
+    .map_err(config_render_error)?;
+    writeln!(
+        config_writer,
+        "{} = \"{}\"",
+        CONFIG_KEY_TARGET_BINARY_NAME,
+        config.target_binary_name.ntk_get()?
+    )
+    .map_err(config_render_error)?;
+    writeln!(
+        config_writer,
+        "{} = \"{}\"",
+        CONFIG_KEY_MODELING_DATA_PATH,
+        config.modeling_data_path.cp_get_text()?
+    )
+    .map_err(config_render_error)?;
+    writeln!(
+        config_writer,
+        "{} = \"{}\"",
+        CONFIG_KEY_SCENARIO_NAME,
+        config.scenario_name.ntk_get()?
+    )
+    .map_err(config_render_error)?;
+    writeln!(
+        config_writer,
+        "{} = \"{}\"",
+        CONFIG_KEY_ANALYSIS_PURPOSE,
+        config.analysis_purpose.ntk_get()?
+    )
+    .map_err(config_render_error)?;
+    writeln!(
+        config_writer,
+        "{} = {}",
+        CONFIG_KEY_TOP_N,
+        config.top_n.tnc_get()?
+    )
+    .map_err(config_render_error)?;
+    if let Some(work_unit_name) = &config.work_unit_name {
+        writeln!(
+            config_writer,
+            "{} = \"{}\"",
+            CONFIG_KEY_WORK_UNIT_NAME,
+            work_unit_name.wun_get()?
+        )
+        .map_err(config_render_error)?;
+    }
+    writeln!(
+        config_writer,
+        "{} = {}",
+        CONFIG_KEY_DEMANGLE_OUTPUTS, config.demangle_outputs
+    )
+    .map_err(config_render_error)?;
+    Ok(())
+}
+
+/// Renders the config file text into `output_buffer` (no heap) and returns
+/// the written part.
+///
+/// # Project context
+/// The whole file is formatted in memory before the file is created, so a
+/// failure never leaves a half-written config on disk (HIX never deletes).
+/// The caller (`write_new_config_file`) passes a `CONFIG_FILE_MAX_BYTES`
+/// stack array; tests also pass smaller buffers.
+///
+/// # Returns
+/// - `Ok(rendered_bytes)`: the start of `output_buffer` holding the file text.
+/// - `Err(CfgRenderBufferFull)` (from `config_render_error`): the text does not fit.
+/// - `Err(CfgRenderedRangeInvalid)` (internal invariant): the writer's end
+///   position does not describe a range inside the buffer.
+/// - `Err` from a field's recheck (`CfgPathValueCorrupted`, `Type*Corrupted`).
+///
+/// # Modes
+/// The internal-invariant check panics in debug builds (not test); test and
+/// debug builds print; production-release returns the code only.
+fn render_config_file_text<'buffer>(
+    config: &HixConfig,
+    output_buffer: &'buffer mut [u8],
+) -> Result<&'buffer [u8], HeatmapError> {
+    let mut buffer_writer = std::io::Cursor::new(output_buffer);
+    write_config_lines(&mut buffer_writer, config)?;
+    let written_end_position = buffer_writer.position();
+    let full_buffer: &'buffer [u8] = buffer_writer.into_inner();
+
+    // --- Check: the written end position is a range inside the buffer ---
+    // internal invariant: a Cursor never writes past its buffer, so its
+    // position is at most the buffer length, which fits in usize.
+    let rendered_bytes = match usize::try_from(written_end_position) {
+        Ok(written_length) => full_buffer.get(..written_length),
+        Err(_conversion_error) => None,
+    };
+    match rendered_bytes {
+        Some(bytes) => Ok(bytes),
+        None => {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: rendered end {} outside buffer of {} bytes",
+                HeatmapError::CfgRenderedRangeInvalid.code(),
+                written_end_position,
+                full_buffer.len()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: rendered end {} outside buffer of {} bytes",
+                HeatmapError::CfgRenderedRangeInvalid.code(),
+                written_end_position,
+                full_buffer.len()
+            );
+            Err(HeatmapError::CfgRenderedRangeInvalid)
+        }
+    }
+}
+
+/// Writes a new config file, then reads it back and compares.
+///
+/// # Project context
+/// Config files are a permanent record of how runs were made, like run and
+/// analysis folders, so an existing file is never overwritten. The reader
+/// defines the file format; the writer is checked against the reader rather
+/// than trusted: the file is read back with the same no-heap reader that the
+/// wizard and replay use, and compared with what was meant.
+///
+/// # Steps
+/// 1. Render the whole text into a stack buffer (nothing on disk yet).
+/// 2. Create the file (create-new; Tier-1 retry for transient errors),
+///    write it in one `write_all`, and sync it to disk.
+/// 3. Load it with `load_config_file` and compare with `config`.
+///
+/// If step 2 or 3 fails after the file was created, the file stays in place
+/// (HIX never deletes); the returned code says not to use it.
+///
+/// # Arguments
+/// - `config_file_path`: absolute path of the config file to create; its
+///   directory must already exist.
+/// - `config`: the config to write.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(821 | 822 | 823 | 824 | 825)`: creating the file failed
+///   (824: the file exists; it is not overwritten).
+/// - `Err(CfgWriteFailed | CfgSyncFailed)`.
+/// - `Err(CfgRoundTripMismatch)` (internal invariant).
+/// - `Err` from `render_config_file_text` and `load_config_file`.
+///
+/// # Modes
+/// Debug builds print each failure; the round-trip check also panics in
+/// debug builds (not test). Production-release returns the code only.
+pub fn write_new_config_file(
+    config_file_path: &AbsolutePath,
+    config: &HixConfig,
+) -> Result<(), HeatmapError> {
+    let file_path = config_file_path.ap_get()?;
+
+    let mut render_buffer: [u8; CONFIG_FILE_MAX_BYTES] = [0u8; CONFIG_FILE_MAX_BYTES];
+    let rendered_bytes = render_config_file_text(config, &mut render_buffer)?;
+
+    let mut config_file = open_file_with_retry(
+        file_path,
+        FileOpenPurpose::CreateNew,
+        CONFIG_WRITE_OPEN_ERROR_CODES,
+    )?;
+    if let Err(_io_error) = config_file.write_all(rendered_bytes) {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: config write failed: {}",
+            HeatmapError::CfgWriteFailed.code(),
+            _io_error
+        );
+        return Err(HeatmapError::CfgWriteFailed);
+    }
+    if let Err(_io_error) = config_file.sync_all() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: config sync failed: {}",
+            HeatmapError::CfgSyncFailed.code(),
+            _io_error
+        );
+        return Err(HeatmapError::CfgSyncFailed);
+    }
+    // Release the file handle before reading the file back.
+    drop(config_file);
+
+    // --- Check: the file reads back as exactly the config written ---
+    // internal invariant: the writer and the loader implement the same layout.
+    let reloaded_config = load_config_file(config_file_path)?;
+    if reloaded_config != *config {
+        #[cfg(all(debug_assertions, not(test)))]
+        debug_assert!(
+            false,
+            "HIX-{}: config read-back differs",
+            HeatmapError::CfgRoundTripMismatch.code()
+        );
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: config read-back differs: wrote {:?}, read {:?}",
+            HeatmapError::CfgRoundTripMismatch.code(),
+            config,
+            reloaded_config
+        );
+        return Err(HeatmapError::CfgRoundTripMismatch);
+    }
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Reading
+// ----------------------------------------------------------------------------
+
+/// Reads one config value into a `VALUE_BUFFER_BYTES` stack array, checks
+/// that it is UTF-8, and hands it to `parse_value`.
+///
+/// # Returns
+/// - `Ok(T)` from `parse_value`.
+/// - Errors from the field reader (e.g. 811 missing, 812 too long).
+/// - `Err(CfgValueLengthInvalid)` (internal invariant: the reader's length
+///   is within its buffer).
+/// - `Err(CfgValueNotUtf8)` (input validation).
+/// - Errors from `parse_value`.
+fn read_config_value<T, F, const VALUE_BUFFER_BYTES: usize>(
+    config_file_path: &Path,
+    config_key: &str,
+    parse_value: F,
+) -> Result<T, HeatmapError>
+where
+    F: FnOnce(&str) -> Result<T, HeatmapError>,
+{
+    let (value_buffer, value_length) = read_single_line_field_from_toml_no_heap::<
+        VALUE_BUFFER_BYTES,
+    >(config_file_path, config_key)?;
+    let value_bytes = match value_buffer.get(..value_length) {
+        Some(bytes) => bytes,
+        None => {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: value length {} beyond buffer {}",
+                HeatmapError::CfgValueLengthInvalid.code(),
+                value_length,
+                VALUE_BUFFER_BYTES
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: value length {} beyond buffer {}",
+                HeatmapError::CfgValueLengthInvalid.code(),
+                value_length,
+                VALUE_BUFFER_BYTES
+            );
+            return Err(HeatmapError::CfgValueLengthInvalid);
+        }
+    };
+    let value_text = match std::str::from_utf8(value_bytes) {
+        Ok(text) => text,
+        Err(_utf8_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: value of {:?} is not UTF-8: {}",
+                HeatmapError::CfgValueNotUtf8.code(),
+                config_key,
+                _utf8_error
+            );
+            return Err(HeatmapError::CfgValueNotUtf8);
+        }
+    };
+    parse_value(value_text)
+}
+
+/// Checks `hix_config_version`.
+/// `Err(CfgVersionNotANumber | CfgUnsupportedVersion)` (input validation).
+fn check_config_format_version(value_text: &str) -> Result<(), HeatmapError> {
+    let format_version = match value_text.trim().parse::<u32>() {
+        Ok(version) => version,
+        Err(_parse_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: hix_config_version {:?}: {}",
+                HeatmapError::CfgVersionNotANumber.code(),
+                value_text,
+                _parse_error
+            );
+            return Err(HeatmapError::CfgVersionNotANumber);
+        }
+    };
+    if format_version != CONFIG_FORMAT_VERSION {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: hix_config_version {} (this HIX reads {})",
+            HeatmapError::CfgUnsupportedVersion.code(),
+            format_version,
+            CONFIG_FORMAT_VERSION
+        );
+        return Err(HeatmapError::CfgUnsupportedVersion);
+    }
+    Ok(())
+}
+
+/// Parses a path value. Errors: see `ConfigPath::new`.
+fn parse_config_path(value_text: &str) -> Result<ConfigPath, HeatmapError> {
+    ConfigPath::cp_new(Path::new(value_text))
+}
+
+/// Parses `top_n`. `Err(CfgTopNInvalid)` (input validation): not a number
+/// or outside 1..=`MAX_TOP_N`. A config-specific code, so a bad config is not
+/// reported as a command-line mistake.
+fn parse_config_top_n(value_text: &str) -> Result<TopNCount, HeatmapError> {
+    let top_n_value = match value_text.trim().parse::<u16>() {
+        Ok(value) => value,
+        Err(_parse_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: top_n {:?}: {}",
+                HeatmapError::CfgTopNInvalid.code(),
+                value_text,
+                _parse_error
+            );
+            return Err(HeatmapError::CfgTopNInvalid);
+        }
+    };
+    match TopNCount::tnc_new(top_n_value) {
+        Ok(top_n) => Ok(top_n),
+        Err(_type_error) => Err(HeatmapError::CfgTopNInvalid),
+    }
+}
+
+/// Parses a boolean: exactly `true` or `false` (spaces around allowed).
+/// `Err(CfgBooleanInvalid)` (input validation).
+fn parse_config_boolean(value_text: &str) -> Result<bool, HeatmapError> {
+    match value_text.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: boolean {:?} is not true or false",
+                HeatmapError::CfgBooleanInvalid.code(),
+                value_text
+            );
+            Err(HeatmapError::CfgBooleanInvalid)
+        }
+    }
+}
+
+/// Parses `work_unit_name`. `Err(CfgWorkUnitNameInvalid)` (input validation);
+/// a config-specific code, so a bad config is not reported as a command-line mistake.
+fn parse_config_work_unit_name(value_text: &str) -> Result<WorkUnitName, HeatmapError> {
+    match WorkUnitName::wun_new(value_text) {
+        Ok(work_unit_name) => Ok(work_unit_name),
+        Err(_type_error) => Err(HeatmapError::CfgWorkUnitNameInvalid),
+    }
+}
+
+/// Loads and validates a config file.
+///
+/// # Steps
+/// 1. Refuse duplicate keys (816), so no value is silently ignored.
+/// 2. Require `hix_config_version` == `CONFIG_FORMAT_VERSION`.
+/// 3. Read each field into a stack buffer and build its enforced type.
+///    `work_unit_name` is optional (missing = `None`); all others are required.
+///
+/// Cost: about two file opens per key, each read one byte per read call.
+/// Negligible for a file of about a dozen lines.
+///
+/// # Returns
+/// - `Ok(HixConfig)`.
+/// - `Err`: field-reader codes 801-816 (811: a required key is missing;
+///   812: a value is longer than its buffer); 817-818 (paths);
+///   829-835; 164/166/168 (names); 155 (the file path's own recheck).
+pub fn load_config_file(config_file_path: &AbsolutePath) -> Result<HixConfig, HeatmapError> {
+    let file_path = config_file_path.ap_get()?;
+    check_toml_keys_are_unique_no_heap(file_path, &CONFIG_KEYS)?;
+
+    read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
+        file_path,
+        CONFIG_KEY_FORMAT_VERSION,
+        check_config_format_version,
+    )?;
+
+    let target_crate_path = read_config_value::<_, _, MAX_CONFIG_PATH_BYTES>(
+        file_path,
+        CONFIG_KEY_TARGET_CRATE_PATH,
+        parse_config_path,
+    )?;
+    let target_binary_name = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
+        file_path,
+        CONFIG_KEY_TARGET_BINARY_NAME,
+        CargoBinaryName::ntk_new,
+    )?;
+    let modeling_data_path = read_config_value::<_, _, MAX_CONFIG_PATH_BYTES>(
+        file_path,
+        CONFIG_KEY_MODELING_DATA_PATH,
+        parse_config_path,
+    )?;
+    let scenario_name = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
+        file_path,
+        CONFIG_KEY_SCENARIO_NAME,
+        ScenarioName::ntk_new,
+    )?;
+    let analysis_purpose = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
+        file_path,
+        CONFIG_KEY_ANALYSIS_PURPOSE,
+        AnalysisPurpose::ntk_new,
+    )?;
+    let top_n = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
+        file_path,
+        CONFIG_KEY_TOP_N,
+        parse_config_top_n,
+    )?;
+    let work_unit_name = match read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
+        file_path,
+        CONFIG_KEY_WORK_UNIT_NAME,
+        parse_config_work_unit_name,
+    ) {
+        Ok(work_unit_name) => Some(work_unit_name),
+        // Optional field: absent means "not set".
+        Err(HeatmapError::RSLFFieldNotFound) => None,
+        Err(other_error) => return Err(other_error),
+    };
+    let demangle_outputs = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
+        file_path,
+        CONFIG_KEY_DEMANGLE_OUTPUTS,
+        parse_config_boolean,
+    )?;
+
+    Ok(HixConfig {
+        target_crate_path,
+        target_binary_name,
+        modeling_data_path,
+        scenario_name,
+        analysis_purpose,
+        top_n,
+        work_unit_name,
+        demangle_outputs,
+    })
+}
+
+// end TOML section
+
+// ============================================================================
 // Enforced custom types (value integrity)
 // ============================================================================
 
@@ -2033,7 +3178,7 @@ pub struct TopNCount {
 
 impl TopNCount {
     /// Validates and constructs. Input-validation error (user-facing).
-    pub fn new(candidate_top_n: u16) -> Result<Self, HeatmapError> {
+    pub fn tnc_new(candidate_top_n: u16) -> Result<Self, HeatmapError> {
         if candidate_top_n == 0 || candidate_top_n > MAX_TOP_N {
             #[cfg(debug_assertions)]
             eprintln!(
@@ -2050,7 +3195,7 @@ impl TopNCount {
     }
 
     /// Returns the value after re-checking validity (guards corruption).
-    pub fn get(&self) -> Result<u16, HeatmapError> {
+    pub fn tnc_get(&self) -> Result<u16, HeatmapError> {
         if self.top_n_value == 0 || self.top_n_value > MAX_TOP_N {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
@@ -2079,7 +3224,7 @@ pub struct SourceLineNumber {
 
 impl SourceLineNumber {
     /// Validates and constructs (line >= 1).
-    pub fn new(candidate_line: u32) -> Result<Self, HeatmapError> {
+    pub fn sln_new(candidate_line: u32) -> Result<Self, HeatmapError> {
         if candidate_line == 0 {
             #[cfg(debug_assertions)]
             eprintln!(
@@ -2094,7 +3239,7 @@ impl SourceLineNumber {
     }
 
     /// Returns the value after re-checking validity.
-    pub fn get(&self) -> Result<u32, HeatmapError> {
+    pub fn sln_get(&self) -> Result<u32, HeatmapError> {
         if self.line_value == 0 {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
@@ -2121,7 +3266,7 @@ pub struct AbsolutePath {
 
 impl AbsolutePath {
     /// Validates and constructs (path must be absolute).
-    pub fn new(candidate_path: PathBuf) -> Result<Self, HeatmapError> {
+    pub fn ap_new(candidate_path: PathBuf) -> Result<Self, HeatmapError> {
         if !candidate_path.is_absolute() {
             #[cfg(debug_assertions)]
             eprintln!(
@@ -2137,7 +3282,7 @@ impl AbsolutePath {
     }
 
     /// Returns the path after re-checking validity.
-    pub fn get(&self) -> Result<&Path, HeatmapError> {
+    pub fn ap_get(&self) -> Result<&Path, HeatmapError> {
         if !self.absolute_path.is_absolute() {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
@@ -2177,7 +3322,7 @@ pub struct RunLabel {
 
 impl RunLabel {
     /// Validates and constructs. Input-validation error (user-facing).
-    pub fn new(candidate_text: &str) -> Result<Self, HeatmapError> {
+    pub fn rl_new(candidate_text: &str) -> Result<Self, HeatmapError> {
         if !is_valid_metadata_text(candidate_text, MAX_RUN_LABEL_BYTES) {
             #[cfg(debug_assertions)]
             eprintln!(
@@ -2194,7 +3339,7 @@ impl RunLabel {
     }
 
     /// Returns the label after re-checking validity (guards corruption).
-    pub fn get(&self) -> Result<&str, HeatmapError> {
+    pub fn rl_get(&self) -> Result<&str, HeatmapError> {
         if !is_valid_metadata_text(&self.run_label_text, MAX_RUN_LABEL_BYTES) {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
@@ -2222,7 +3367,7 @@ pub struct RunDurationSeconds {
 
 impl RunDurationSeconds {
     /// Validates and constructs. Input-validation error (user-facing).
-    pub fn new(candidate_seconds: u64) -> Result<Self, HeatmapError> {
+    pub fn rds_new(candidate_seconds: u64) -> Result<Self, HeatmapError> {
         if candidate_seconds == 0 || candidate_seconds > MAX_RUN_DURATION_SECS {
             #[cfg(debug_assertions)]
             eprintln!(
@@ -2239,7 +3384,7 @@ impl RunDurationSeconds {
     }
 
     /// Returns the value after re-checking validity.
-    pub fn get(&self) -> Result<u64, HeatmapError> {
+    pub fn rds_get(&self) -> Result<u64, HeatmapError> {
         if self.duration_seconds == 0 || self.duration_seconds > MAX_RUN_DURATION_SECS {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
@@ -2269,7 +3414,7 @@ pub struct WorkUnitCount {
 
 impl WorkUnitCount {
     /// Validates and constructs. Input-validation error (user-facing).
-    pub fn new(candidate_count: u64) -> Result<Self, HeatmapError> {
+    pub fn wuc_new(candidate_count: u64) -> Result<Self, HeatmapError> {
         if candidate_count == 0 || candidate_count > MAX_WORK_UNITS {
             #[cfg(debug_assertions)]
             eprintln!(
@@ -2286,7 +3431,7 @@ impl WorkUnitCount {
     }
 
     /// Returns the value after re-checking validity.
-    pub fn get(&self) -> Result<u64, HeatmapError> {
+    pub fn wuc_get(&self) -> Result<u64, HeatmapError> {
         if self.work_unit_count == 0 || self.work_unit_count > MAX_WORK_UNITS {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
@@ -2315,7 +3460,7 @@ pub struct WorkUnitName {
 
 impl WorkUnitName {
     /// Validates and constructs. Input-validation error (user-facing).
-    pub fn new(candidate_text: &str) -> Result<Self, HeatmapError> {
+    pub fn wun_new(candidate_text: &str) -> Result<Self, HeatmapError> {
         if !is_valid_metadata_text(candidate_text, MAX_WORK_UNIT_NAME_BYTES) {
             #[cfg(debug_assertions)]
             eprintln!(
@@ -2332,7 +3477,7 @@ impl WorkUnitName {
     }
 
     /// Returns the name after re-checking validity (guards corruption).
-    pub fn get(&self) -> Result<&str, HeatmapError> {
+    pub fn wun_get(&self) -> Result<&str, HeatmapError> {
         if !is_valid_metadata_text(&self.work_unit_name_text, MAX_WORK_UNIT_NAME_BYTES) {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
@@ -2711,6 +3856,7 @@ struct ReportInputs<'a> {
     /// Optional run description.
     run_metadata: &'a RunMetadata,
 }
+
 // ============================================================================
 // Public entry points
 // ============================================================================
@@ -2824,9 +3970,9 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
 fn run_heatmap_with_configuration(
     run_configuration: &HeatmapRunConfiguration,
 ) -> Result<(), HeatmapError> {
-    let lcov_input_path = run_configuration.lcov_input_path.get()?;
-    let output_directory_path = run_configuration.output_directory_path.get()?;
-    let top_n_limit = usize::from(run_configuration.top_n.get()?);
+    let lcov_input_path = run_configuration.lcov_input_path.ap_get()?;
+    let output_directory_path = run_configuration.output_directory_path.ap_get()?;
+    let top_n_limit = usize::from(run_configuration.top_n.tnc_get()?);
 
     // Step 0: output-directory safety preflight (fail fast, before any work).
     check_output_path_is_new(output_directory_path)?;
@@ -3057,14 +4203,14 @@ where
     // Step 4: run metadata (optional).
     let run_label = match &raw_values.run_label {
         None => None,
-        Some(value_argument) => Some(RunLabel::new(flag_value_as_text(
+        Some(value_argument) => Some(RunLabel::rl_new(flag_value_as_text(
             value_argument,
             HeatmapError::CliRunLabelNotUtf8,
         )?)?),
     };
     let run_duration = match &raw_values.run_duration_secs {
         None => None,
-        Some(value_argument) => Some(RunDurationSeconds::new(parse_u64_flag_value(
+        Some(value_argument) => Some(RunDurationSeconds::rds_new(parse_u64_flag_value(
             value_argument,
             HeatmapError::CliRunDurationNotUtf8,
             HeatmapError::CliRunDurationNotANumber,
@@ -3083,17 +4229,17 @@ where
             let name_text =
                 flag_value_as_text(name_argument, HeatmapError::CliWorkUnitNameNotUtf8)?;
             Some(WorkUnits {
-                count: WorkUnitCount::new(count_value)?,
-                name: WorkUnitName::new(name_text)?,
+                count: WorkUnitCount::wuc_new(count_value)?,
+                name: WorkUnitName::wun_new(name_text)?,
             })
         }
     };
 
     // Step 5: enforced types.
     Ok(HeatmapRunConfiguration {
-        lcov_input_path: AbsolutePath::new(lcov_path)?,
-        output_directory_path: AbsolutePath::new(output_directory)?,
-        top_n: TopNCount::new(top_n_value)?,
+        lcov_input_path: AbsolutePath::ap_new(lcov_path)?,
+        output_directory_path: AbsolutePath::ap_new(output_directory)?,
+        top_n: TopNCount::tnc_new(top_n_value)?,
         run_metadata: RunMetadata {
             run_label,
             run_duration,
@@ -3699,7 +4845,7 @@ fn parse_lcov_line_number(line_text: &str) -> Result<SourceLineNumber, HeatmapEr
             return Err(HeatmapError::LcovBadLineNumber);
         }
     };
-    match SourceLineNumber::new(raw_line) {
+    match SourceLineNumber::sln_new(raw_line) {
         Ok(line_number) => Ok(line_number),
         Err(_type_error) => Err(HeatmapError::LcovBadLineNumber),
     }
@@ -3893,19 +5039,19 @@ fn scan_all_files_for_loops(
             continue;
         }
 
-        let absolute_source_path = match AbsolutePath::new(PathBuf::from(&record.source_path_text))
-        {
-            Ok(path) => path,
-            Err(type_error) => {
-                record_skipped_file(
-                    &mut scan_statistics,
-                    &mut file_notes,
-                    file_index,
-                    type_error,
-                );
-                continue;
-            }
-        };
+        let absolute_source_path =
+            match AbsolutePath::ap_new(PathBuf::from(&record.source_path_text)) {
+                Ok(path) => path,
+                Err(type_error) => {
+                    record_skipped_file(
+                        &mut scan_statistics,
+                        &mut file_notes,
+                        file_index,
+                        type_error,
+                    );
+                    continue;
+                }
+            };
 
         match scan_one_source_file(&absolute_source_path, file_index, record) {
             Ok(scan_outcome) => {
@@ -4133,7 +5279,7 @@ fn scan_one_source_file(
     file_index: usize,
     record: &FileCoverageRecord,
 ) -> Result<SourceScanOutcome, HeatmapError> {
-    let source_path = absolute_source_path.get()?;
+    let source_path = absolute_source_path.ap_get()?;
     let source_file = open_file_with_retry(
         source_path,
         FileOpenPurpose::ReadExisting,
@@ -4248,7 +5394,7 @@ fn scan_source_reader<R: BufRead>(
             Ok(value) => value,
             Err(_conversion_error) => return Err(HeatmapError::SrcLineNumberOverflow),
         };
-        let line_number = SourceLineNumber::new(line_value)?;
+        let line_number = SourceLineNumber::sln_new(line_value)?;
 
         let header_line_count = match record.line_execution_counts.get(&line_number) {
             Some(&count) => count,
@@ -4943,14 +6089,14 @@ fn write_run_metadata_provenance<W: Write>(
         Some(run_label) => writeln!(
             report_writer,
             "  run label               : {}",
-            run_label.get()?
+            run_label.rl_get()?
         ),
         None => writeln!(report_writer, "  run label               : (not given)"),
     }
     .map_err(report_buffer_write_error)?;
 
     let duration_seconds = match &run_metadata.run_duration {
-        Some(run_duration) => Some(run_duration.get()?),
+        Some(run_duration) => Some(run_duration.rds_get()?),
         None => None,
     };
     match duration_seconds {
@@ -4965,7 +6111,7 @@ fn write_run_metadata_provenance<W: Write>(
     .map_err(report_buffer_write_error)?;
 
     let work_unit_values = match &run_metadata.work_units {
-        Some(work_units) => Some((work_units.count.get()?, work_units.name.get()?)),
+        Some(work_units) => Some((work_units.count.wuc_get()?, work_units.name.wun_get()?)),
         None => None,
     };
     match work_unit_values {
@@ -5301,7 +6447,7 @@ fn write_heat_kind_section<W: Write>(
     .map_err(report_buffer_write_error)?;
     for (rank_index, site) in sorted_sites.iter().take(top_n_limit).enumerate() {
         let source_path_text = lookup_source_path(records, site.source_file_index)?;
-        let line_value = site.line_number.get()?;
+        let line_value = site.line_number.sln_get()?;
         let share_percent = percent_of_total(site.execution_count, summary.total_count);
         let rank = rank_index.saturating_add(1);
         if site.execution_count == 0 {
@@ -5541,7 +6687,7 @@ fn write_distribution_shape_for_kind<W: Write>(
             .map_err(report_buffer_write_error)?;
             for (direction_label, site) in [("from", higher_site), ("to  ", lower_site)] {
                 let source_path_text = lookup_source_path(records, site.source_file_index)?;
-                let line_value = site.line_number.get()?;
+                let line_value = site.line_number.sln_get()?;
                 writeln!(
                     report_writer,
                     "      {}  {}:{}  {}",
@@ -5692,7 +6838,7 @@ fn write_co_count_groups<W: Write>(
         .map_err(report_buffer_write_error)?;
         for (kind_label, site) in run_members.iter() {
             let source_path_text = lookup_source_path(inputs.records, site.source_file_index)?;
-            let line_value = site.line_number.get()?;
+            let line_value = site.line_number.sln_get()?;
             writeln!(
                 report_writer,
                 "    {:<8}  {}:{}  {}",
@@ -5729,7 +6875,7 @@ fn write_sites_tsv<W: Write>(
     inputs: &ReportInputs,
 ) -> Result<(), HeatmapError> {
     let work_unit_count = match &inputs.run_metadata.work_units {
-        Some(work_units) => Some(work_units.count.get()?),
+        Some(work_units) => Some(work_units.count.wuc_get()?),
         None => None,
     };
     write!(
@@ -5799,7 +6945,7 @@ fn write_tsv_rows<W: Write>(
 ) -> Result<(), HeatmapError> {
     for (rank_index, site) in sorted_sites.iter().enumerate() {
         let source_path_text = lookup_source_path(records, site.source_file_index)?;
-        let line_value = site.line_number.get()?;
+        let line_value = site.line_number.sln_get()?;
         let share_percent = percent_of_total(site.execution_count, summary.total_count);
 
         // Columns 1-4: kind, rank, count, percent_of_kind (each followed by a tab).
@@ -5927,7 +7073,7 @@ fn idle() {}\n";
     fn make_site(execution_count: u64, line: u32) -> HeatSite {
         HeatSite {
             source_file_index: 0,
-            line_number: SourceLineNumber::new(line).unwrap(),
+            line_number: SourceLineNumber::sln_new(line).unwrap(),
             display_name: String::from("test_site"),
             execution_count,
             merged_instance_count: 1,
@@ -6044,7 +7190,7 @@ fn idle() {}\n";
         assert_eq!(outcome.loop_headers_found, 1);
         assert_eq!(outcome.loop_sites.len(), 1);
         assert_eq!(outcome.loop_sites[0].execution_count, 75_750);
-        assert_eq!(outcome.loop_sites[0].line_number.get().unwrap(), 3);
+        assert_eq!(outcome.loop_sites[0].line_number.sln_get().unwrap(), 3);
         assert!(outcome.loop_sites[0].display_name.contains("tick"));
     }
 
@@ -6196,26 +7342,26 @@ fn idle() {}\n";
 
     #[test]
     fn type_top_n_count_new_out_of_range_with_code_150() {
-        let error = TopNCount::new(0).unwrap_err();
+        let error = TopNCount::tnc_new(0).unwrap_err();
         assert_eq!(error, HeatmapError::TypeTopNOutOfRange);
         assert_eq!(error.code(), 150);
         assert_eq!(
-            TopNCount::new(MAX_TOP_N + 1).unwrap_err(),
+            TopNCount::tnc_new(MAX_TOP_N + 1).unwrap_err(),
             HeatmapError::TypeTopNOutOfRange
         );
-        assert_eq!(TopNCount::new(5).unwrap().get().unwrap(), 5);
+        assert_eq!(TopNCount::tnc_new(5).unwrap().tnc_get().unwrap(), 5);
     }
 
     #[test]
     fn type_source_line_number_new_zero_with_code_152() {
-        let error = SourceLineNumber::new(0).unwrap_err();
+        let error = SourceLineNumber::sln_new(0).unwrap_err();
         assert_eq!(error, HeatmapError::TypeLineNumberZero);
         assert_eq!(error.code(), 152);
     }
 
     #[test]
     fn type_absolute_path_new_relative_with_code_154() {
-        let error = AbsolutePath::new(PathBuf::from("relative/x.lcov")).unwrap_err();
+        let error = AbsolutePath::ap_new(PathBuf::from("relative/x.lcov")).unwrap_err();
         assert_eq!(error, HeatmapError::TypePathNotAbsolute);
         assert_eq!(error.code(), 154);
     }
@@ -6235,9 +7381,9 @@ fn idle() {}\n";
             OsString::from("7"),
         ];
         let configuration = parse_cli_arguments(arguments.into_iter()).unwrap();
-        assert_eq!(configuration.top_n.get().unwrap(), 7);
+        assert_eq!(configuration.top_n.tnc_get().unwrap(), 7);
         assert_eq!(
-            configuration.lcov_input_path.get().unwrap(),
+            configuration.lcov_input_path.ap_get().unwrap(),
             lcov_path.as_path()
         );
     }
@@ -6371,7 +7517,7 @@ fn idle() {}\n";
         assert_eq!(outcome.overlong_lines_found, 1);
         assert_eq!(outcome.loop_headers_found, 1);
         assert_eq!(outcome.loop_sites.len(), 1);
-        assert_eq!(outcome.loop_sites[0].line_number.get().unwrap(), 3);
+        assert_eq!(outcome.loop_sites[0].line_number.sln_get().unwrap(), 3);
         assert_eq!(outcome.loop_sites[0].execution_count, 500);
         assert_eq!(
             outcome.loop_sites[0].enclosing_function_entry_count,
@@ -6394,7 +7540,7 @@ fn idle() {}\n";
             scan_source_reader(&mut Cursor::new(source_text.as_bytes()), 0, &records[0]).unwrap();
         assert_eq!(outcome.overlong_lines_found, 1);
         assert_eq!(outcome.loop_sites.len(), 1);
-        assert_eq!(outcome.loop_sites[0].line_number.get().unwrap(), 2);
+        assert_eq!(outcome.loop_sites[0].line_number.sln_get().unwrap(), 2);
         assert_eq!(outcome.loop_sites[0].execution_count, 7);
     }
 
@@ -6416,7 +7562,7 @@ fn idle() {}\n";
             scan_source_reader(&mut Cursor::new(source_text.as_bytes()), 0, &records[0]).unwrap();
         assert_eq!(outcome.overlong_lines_found, 1);
         assert_eq!(outcome.loop_sites.len(), 1);
-        assert_eq!(outcome.loop_sites[0].line_number.get().unwrap(), 4);
+        assert_eq!(outcome.loop_sites[0].line_number.sln_get().unwrap(), 4);
     }
 
     /// A loop header at the start of an over-long line is detected from the
@@ -6434,7 +7580,7 @@ fn idle() {}\n";
             scan_source_reader(&mut Cursor::new(source_text.as_bytes()), 0, &records[0]).unwrap();
         assert_eq!(outcome.overlong_lines_found, 1);
         assert_eq!(outcome.loop_sites.len(), 1);
-        assert_eq!(outcome.loop_sites[0].line_number.get().unwrap(), 2);
+        assert_eq!(outcome.loop_sites[0].line_number.sln_get().unwrap(), 2);
         assert_eq!(outcome.loop_sites[0].execution_count, 42);
     }
 
@@ -6651,7 +7797,7 @@ fn idle() {}\n";
     #[test]
     fn type_top_n_count_get_corrupted_with_code_151() {
         let corrupted = TopNCount { top_n_value: 0 };
-        let error = corrupted.get().unwrap_err();
+        let error = corrupted.tnc_get().unwrap_err();
         assert_eq!(error, HeatmapError::TypeTopNCorrupted);
         assert_eq!(error.code(), 151);
     }
@@ -6660,7 +7806,7 @@ fn idle() {}\n";
     #[test]
     fn type_source_line_number_get_corrupted_with_code_153() {
         let corrupted = SourceLineNumber { line_value: 0 };
-        let error = corrupted.get().unwrap_err();
+        let error = corrupted.sln_get().unwrap_err();
         assert_eq!(error, HeatmapError::TypeLineNumberCorrupted);
         assert_eq!(error.code(), 153);
     }
@@ -6671,7 +7817,7 @@ fn idle() {}\n";
         let corrupted = AbsolutePath {
             absolute_path: PathBuf::from("relative/path"),
         };
-        let error = corrupted.get().unwrap_err();
+        let error = corrupted.ap_get().unwrap_err();
         assert_eq!(error, HeatmapError::TypePathCorrupted);
         assert_eq!(error.code(), 155);
     }
@@ -6977,13 +8123,13 @@ fn idle() {}\n";
         .unwrap();
         let run_metadata = &configuration.run_metadata;
         assert_eq!(
-            run_metadata.run_label.as_ref().unwrap().get().unwrap(),
+            run_metadata.run_label.as_ref().unwrap().rl_get().unwrap(),
             "run_005_pumpkin"
         );
-        assert_eq!(run_metadata.run_duration.unwrap().get().unwrap(), 300);
+        assert_eq!(run_metadata.run_duration.unwrap().rds_get().unwrap(), 300);
         let work_units = run_metadata.work_units.as_ref().unwrap();
-        assert_eq!(work_units.count.get().unwrap(), 1200);
-        assert_eq!(work_units.name.get().unwrap(), "chunks_generated");
+        assert_eq!(work_units.count.wuc_get().unwrap(), 1200);
+        assert_eq!(work_units.name.wun_get().unwrap(), "chunks_generated");
     }
 
     /// Without metadata flags, metadata is empty (all optional).
@@ -7047,19 +8193,19 @@ fn idle() {}\n";
     #[test]
     fn type_run_label_new_invalid_with_code_156() {
         for bad_label in ["", "run 005", "run/005", "run\t005"] {
-            let error = RunLabel::new(bad_label).unwrap_err();
+            let error = RunLabel::rl_new(bad_label).unwrap_err();
             assert_eq!(error, HeatmapError::TypeRunLabelInvalid);
             assert_eq!(error.code(), 156);
         }
         let too_long = "x".repeat(MAX_RUN_LABEL_BYTES + 1);
         assert_eq!(
-            RunLabel::new(&too_long).unwrap_err(),
+            RunLabel::rl_new(&too_long).unwrap_err(),
             HeatmapError::TypeRunLabelInvalid
         );
         assert_eq!(
-            RunLabel::new("run_005_pumpkin.v2-a")
+            RunLabel::rl_new("run_005_pumpkin.v2-a")
                 .unwrap()
-                .get()
+                .rl_get()
                 .unwrap(),
             "run_005_pumpkin.v2-a"
         );
@@ -7070,21 +8216,24 @@ fn idle() {}\n";
         let corrupted = RunLabel {
             run_label_text: String::from("bad label"),
         };
-        let error = corrupted.get().unwrap_err();
+        let error = corrupted.rl_get().unwrap_err();
         assert_eq!(error, HeatmapError::TypeRunLabelCorrupted);
         assert_eq!(error.code(), 157);
     }
 
     #[test]
     fn type_run_duration_seconds_new_out_of_range_with_code_158() {
-        let error = RunDurationSeconds::new(0).unwrap_err();
+        let error = RunDurationSeconds::rds_new(0).unwrap_err();
         assert_eq!(error, HeatmapError::TypeRunDurationOutOfRange);
         assert_eq!(error.code(), 158);
         assert_eq!(
-            RunDurationSeconds::new(MAX_RUN_DURATION_SECS + 1).unwrap_err(),
+            RunDurationSeconds::rds_new(MAX_RUN_DURATION_SECS + 1).unwrap_err(),
             HeatmapError::TypeRunDurationOutOfRange
         );
-        assert_eq!(RunDurationSeconds::new(300).unwrap().get().unwrap(), 300);
+        assert_eq!(
+            RunDurationSeconds::rds_new(300).unwrap().rds_get().unwrap(),
+            300
+        );
     }
 
     #[test]
@@ -7092,18 +8241,18 @@ fn idle() {}\n";
         let corrupted = RunDurationSeconds {
             duration_seconds: 0,
         };
-        let error = corrupted.get().unwrap_err();
+        let error = corrupted.rds_get().unwrap_err();
         assert_eq!(error, HeatmapError::TypeRunDurationCorrupted);
         assert_eq!(error.code(), 159);
     }
 
     #[test]
     fn type_work_unit_count_new_out_of_range_with_code_160() {
-        let error = WorkUnitCount::new(0).unwrap_err();
+        let error = WorkUnitCount::wuc_new(0).unwrap_err();
         assert_eq!(error, HeatmapError::TypeWorkUnitsOutOfRange);
         assert_eq!(error.code(), 160);
         assert_eq!(
-            WorkUnitCount::new(MAX_WORK_UNITS + 1).unwrap_err(),
+            WorkUnitCount::wuc_new(MAX_WORK_UNITS + 1).unwrap_err(),
             HeatmapError::TypeWorkUnitsOutOfRange
         );
     }
@@ -7111,19 +8260,19 @@ fn idle() {}\n";
     #[test]
     fn type_work_unit_count_get_corrupted_with_code_161() {
         let corrupted = WorkUnitCount { work_unit_count: 0 };
-        let error = corrupted.get().unwrap_err();
+        let error = corrupted.wuc_get().unwrap_err();
         assert_eq!(error, HeatmapError::TypeWorkUnitsCorrupted);
         assert_eq!(error.code(), 161);
     }
 
     #[test]
     fn type_work_unit_name_new_invalid_with_code_162() {
-        let error = WorkUnitName::new("chunks generated").unwrap_err();
+        let error = WorkUnitName::wun_new("chunks generated").unwrap_err();
         assert_eq!(error, HeatmapError::TypeWorkUnitNameInvalid);
         assert_eq!(error.code(), 162);
         let too_long = "x".repeat(MAX_WORK_UNIT_NAME_BYTES + 1);
         assert_eq!(
-            WorkUnitName::new(&too_long).unwrap_err(),
+            WorkUnitName::wun_new(&too_long).unwrap_err(),
             HeatmapError::TypeWorkUnitNameInvalid
         );
     }
@@ -7133,7 +8282,7 @@ fn idle() {}\n";
         let corrupted = WorkUnitName {
             work_unit_name_text: String::from("bad\tname"),
         };
-        let error = corrupted.get().unwrap_err();
+        let error = corrupted.wun_get().unwrap_err();
         assert_eq!(error, HeatmapError::TypeWorkUnitNameCorrupted);
         assert_eq!(error.code(), 163);
     }
@@ -7145,11 +8294,11 @@ fn idle() {}\n";
         let records = parse_sample();
         let function_sites = vec![make_site(2400, 1)];
         let run_metadata = RunMetadata {
-            run_label: Some(RunLabel::new("run_005_pumpkin").unwrap()),
-            run_duration: Some(RunDurationSeconds::new(300).unwrap()),
+            run_label: Some(RunLabel::rl_new("run_005_pumpkin").unwrap()),
+            run_duration: Some(RunDurationSeconds::rds_new(300).unwrap()),
             work_units: Some(WorkUnits {
-                count: WorkUnitCount::new(1200).unwrap(),
-                name: WorkUnitName::new("chunks_generated").unwrap(),
+                count: WorkUnitCount::wuc_new(1200).unwrap(),
+                name: WorkUnitName::wun_new("chunks_generated").unwrap(),
             }),
         };
         let (report_text, tsv_text) = render_reports(
@@ -7297,5 +8446,408 @@ fn idle() {}\n";
         assert!(report_text.contains("largest drop within 99% head"));
         assert!(report_text.contains("10.0000x  rank 1 -> 2  (count 1000 -> 100)"));
         assert!(report_text.contains("  LOOPS\n    n/a (total count is 0)"));
+    }
+
+    // ------------------------------------------------------------------
+    // HIX config files
+    // ------------------------------------------------------------------
+
+    /// A complete, valid config. Paths need not exist: config files store
+    /// paths; they do not check them.
+    fn sample_config(work_unit_name: Option<&str>) -> HixConfig {
+        HixConfig {
+            target_crate_path: ConfigPath::cp_new(Path::new("/home/user/code/Pumpkin")).unwrap(),
+            target_binary_name: CargoBinaryName::ntk_new("pumpkin").unwrap(),
+            modeling_data_path: ConfigPath::cp_new(Path::new(
+                "/home/user/code/hix_heatmap_indices_for_compute/modeling_data",
+            ))
+            .unwrap(),
+            scenario_name: ScenarioName::ntk_new("pumpkin_world_spawn").unwrap(),
+            analysis_purpose: AnalysisPurpose::ntk_new("count_baseline").unwrap(),
+            top_n: TopNCount::tnc_new(15).unwrap(),
+            work_unit_name: work_unit_name.map(|name| WorkUnitName::wun_new(name).unwrap()),
+            demangle_outputs: true,
+        }
+    }
+
+    /// Renders a config into a `String` (heap is fine in tests).
+    fn render_config_to_string(config: &HixConfig) -> String {
+        let mut buffer = vec![0u8; CONFIG_FILE_MAX_BYTES];
+        let rendered_bytes = render_config_file_text(config, &mut buffer).unwrap();
+        String::from_utf8(rendered_bytes.to_vec()).unwrap()
+    }
+
+    /// Writes `config_text` to `hix_test.toml` in a new unique temp directory.
+    /// Returns the directory (for cleanup) and the file path.
+    fn write_temp_config_text(test_label: &str, config_text: &str) -> (PathBuf, AbsolutePath) {
+        let directory = unique_temp_path(test_label);
+        fs::create_dir(&directory).unwrap();
+        let file_path = directory.join("hix_test.toml");
+        fs::write(&file_path, config_text).unwrap();
+        (directory, AbsolutePath::ap_new(file_path).unwrap())
+    }
+
+    /// Removes a config file and its temp directory.
+    fn remove_temp_config(directory: &Path, config_file_path: &AbsolutePath) {
+        fs::remove_file(config_file_path.ap_get().unwrap()).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    /// Each name kind rejects text outside its rule with its own code, so a
+    /// failure names the field: empty, a space, a slash, and one byte over
+    /// the kind's maximum. A name at exactly the maximum is accepted.
+    #[test]
+    fn type_name_text_new_invalid_with_codes_164_166_168() {
+        for bad_text in ["", "world spawn", "world/spawn"] {
+            assert_eq!(
+                ScenarioName::ntk_new(bad_text).unwrap_err(),
+                HeatmapError::TypeScenarioNameInvalid
+            );
+            assert_eq!(
+                CargoBinaryName::ntk_new(bad_text).unwrap_err(),
+                HeatmapError::TypeCargoBinaryNameInvalid
+            );
+            assert_eq!(
+                AnalysisPurpose::ntk_new(bad_text).unwrap_err(),
+                HeatmapError::TypeAnalysisPurposeInvalid
+            );
+        }
+        assert_eq!(HeatmapError::TypeScenarioNameInvalid.code(), 164);
+        assert_eq!(HeatmapError::TypeCargoBinaryNameInvalid.code(), 166);
+        assert_eq!(HeatmapError::TypeAnalysisPurposeInvalid.code(), 168);
+
+        assert!(ScenarioName::ntk_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES)).is_ok());
+        assert_eq!(
+            ScenarioName::ntk_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES + 1)).unwrap_err(),
+            HeatmapError::TypeScenarioNameInvalid
+        );
+        assert_eq!(
+            CargoBinaryName::ntk_new(&"b".repeat(MAX_CARGO_BINARY_NAME_BYTES + 1)).unwrap_err(),
+            HeatmapError::TypeCargoBinaryNameInvalid
+        );
+        assert_eq!(
+            AnalysisPurpose::ntk_new(&"p".repeat(MAX_ANALYSIS_PURPOSE_BYTES + 1)).unwrap_err(),
+            HeatmapError::TypeAnalysisPurposeInvalid
+        );
+    }
+
+    /// Invariant catch: names corrupted after construction (built directly,
+    /// bypassing `new`) are rejected by `get` with each kind's own code.
+    #[test]
+    fn type_name_text_get_corrupted_with_codes_165_167_169() {
+        let scenario: ScenarioName = NameText {
+            name_text: String::from("bad name"),
+            kind: PhantomData,
+        };
+        let binary: CargoBinaryName = NameText {
+            name_text: String::new(),
+            kind: PhantomData,
+        };
+        let purpose: AnalysisPurpose = NameText {
+            name_text: String::from("bad/purpose"),
+            kind: PhantomData,
+        };
+        assert_eq!(scenario.ntk_get().unwrap_err().code(), 165);
+        assert_eq!(binary.ntk_get().unwrap_err().code(), 167);
+        assert_eq!(purpose.ntk_get().unwrap_err().code(), 169);
+    }
+
+    /// Path field values: relative paths are refused (817). Non-UTF-8 paths,
+    /// quotes, backslashes, control bytes, and over-long paths are refused
+    /// (818), because they could not be written and read back unchanged. The
+    /// longest storable path is accepted, and the accessor returns the path's
+    /// own characters.
+    #[test]
+    fn cfg_config_field_path_new_rejects_with_codes_817_818() {
+        let error = ConfigFieldPath::new(Path::new("relative/crate")).unwrap_err();
+        assert_eq!(error, HeatmapError::CfgPathNotAbsolute);
+        assert_eq!(error.code(), 817);
+
+        for bad_text in [
+            "/home/user/a\"b",
+            "/home/user/a\\b",
+            "/home/user/a\nb",
+            "/home/user/a\tb",
+        ] {
+            let error = ConfigFieldPath::new(Path::new(bad_text)).unwrap_err();
+            assert_eq!(error, HeatmapError::CfgPathValueInvalid, "{:?}", bad_text);
+            assert_eq!(error.code(), 818);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let non_utf8_path = Path::new(std::ffi::OsStr::from_bytes(b"/home/user/a\xffb"));
+            assert_eq!(
+                ConfigFieldPath::new(non_utf8_path).unwrap_err(),
+                HeatmapError::CfgPathValueInvalid
+            );
+        }
+
+        let longest_path = format!("/{}", "a".repeat(MAX_CONFIG_PATH_BYTES - 1));
+        assert!(ConfigFieldPath::new(Path::new(&longest_path)).is_ok());
+        let one_byte_over = format!("/{}", "a".repeat(MAX_CONFIG_PATH_BYTES));
+        assert_eq!(
+            ConfigFieldPath::new(Path::new(&one_byte_over)).unwrap_err(),
+            HeatmapError::CfgPathValueInvalid
+        );
+
+        let field_path = ConfigFieldPath::new(Path::new("/home/user/code")).unwrap();
+        assert_eq!(field_path.get_path_str().unwrap(), "/home/user/code");
+    }
+
+    /// Invariant catch: a path value corrupted after construction (relative,
+    /// or holding a quote; built directly, bypassing `new`) is rejected by
+    /// `get_path_str` with 819.
+    #[test]
+    fn cfg_config_field_path_get_path_str_corrupted_with_code_819() {
+        for corrupted_text in ["relative/path", "/home/a\"b"] {
+            let corrupted = ConfigFieldPath {
+                field_path_text: String::from(corrupted_text),
+            };
+            let error = corrupted.get_path_str().unwrap_err();
+            assert_eq!(error, HeatmapError::CfgPathValueCorrupted);
+            assert_eq!(error.code(), 819);
+        }
+    }
+
+    /// The written layout is fixed, so config files written by different HIX
+    /// runs look the same and can be compared and hand-read.
+    ///
+    /// The expected text is built with `concat!`, one literal per line, so the
+    /// test cannot be broken by re-indenting the source (a string-continuation
+    /// literal would take on any indentation added by an editor or formatter).
+    #[test]
+    fn cfg_render_config_file_text_matches_layout() {
+        let expected_text = concat!(
+            "# HIX config file (TOML subset: one `key = value` per line, top level only).\n",
+            "# Written by HIX. Hand edits are allowed; values may not contain double quotes or backslashes.\n",
+            "hix_config_version = 1\n",
+            "target_crate_path = \"/home/user/code/Pumpkin\"\n",
+            "target_binary_name = \"pumpkin\"\n",
+            "modeling_data_path = \"/home/user/code/hix_heatmap_indices_for_compute/modeling_data\"\n",
+            "scenario_name = \"pumpkin_world_spawn\"\n",
+            "analysis_purpose = \"count_baseline\"\n",
+            "top_n = 15\n",
+            "work_unit_name = \"chunks_generated\"\n",
+            "demangle_outputs = true\n",
+        );
+        assert_eq!(
+            render_config_to_string(&sample_config(Some("chunks_generated"))),
+            expected_text
+        );
+    }
+
+    /// `CONFIG_KEYS` and the writer stay in step: with every field set, each
+    /// key is written on exactly one line. A key added to one and not the
+    /// other fails here.
+    #[test]
+    fn cfg_render_config_file_text_writes_every_key_once() {
+        let rendered_text = render_config_to_string(&sample_config(Some("chunks_generated")));
+        let key_line_total = rendered_text
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .count();
+        assert_eq!(key_line_total, CONFIG_KEY_COUNT);
+        for config_key in CONFIG_KEYS.iter() {
+            let key_prefix = format!("{} = ", config_key);
+            let matching_lines = rendered_text
+                .lines()
+                .filter(|line| line.starts_with(&key_prefix))
+                .count();
+            assert_eq!(matching_lines, 1, "key {}", config_key);
+        }
+    }
+
+    /// An unset optional work-unit name is omitted entirely (absent = not set).
+    #[test]
+    fn cfg_render_config_file_text_omits_absent_work_unit_name() {
+        let rendered_text = render_config_to_string(&sample_config(None));
+        assert!(!rendered_text.contains(CONFIG_KEY_WORK_UNIT_NAME));
+    }
+
+    /// Rendering into a buffer that is too small returns 820, never a
+    /// truncated file.
+    #[test]
+    fn cfg_render_config_file_text_small_buffer_with_code_820() {
+        let mut small_buffer = [0u8; 64];
+        let error = render_config_file_text(&sample_config(None), &mut small_buffer).unwrap_err();
+        assert_eq!(error, HeatmapError::CfgRenderBufferFull);
+        assert_eq!(error.code(), 820);
+    }
+
+    /// Write, read back, and compare, with and without the optional field.
+    /// A second write to the same path is refused (824), and the existing
+    /// file is unchanged: configs are a record and are never overwritten.
+    #[test]
+    fn cfg_write_new_config_file_round_trip_and_no_overwrite_with_code_824() {
+        let directory = unique_temp_path("cfg_round_trip");
+        fs::create_dir(&directory).unwrap();
+        let with_units_path =
+            AbsolutePath::ap_new(directory.join("hix_pumpkin_world_spawn.toml")).unwrap();
+        let without_units_path = AbsolutePath::ap_new(directory.join("hix_no_units.toml")).unwrap();
+
+        let config_with_units = sample_config(Some("chunks_generated"));
+        write_new_config_file(&with_units_path, &config_with_units).unwrap();
+        assert_eq!(
+            load_config_file(&with_units_path).unwrap(),
+            config_with_units
+        );
+
+        let config_without_units = sample_config(None);
+        write_new_config_file(&without_units_path, &config_without_units).unwrap();
+        let reloaded = load_config_file(&without_units_path).unwrap();
+        assert_eq!(reloaded, config_without_units);
+        assert!(reloaded.work_unit_name.is_none());
+
+        let original_bytes = fs::read(with_units_path.ap_get().unwrap()).unwrap();
+        let error = write_new_config_file(&with_units_path, &config_without_units).unwrap_err();
+        assert_eq!(error, HeatmapError::CfgWriteOpenAlreadyExists);
+        assert_eq!(error.code(), 824);
+        assert!(!error.is_retryable());
+        assert_eq!(
+            fs::read(with_units_path.ap_get().unwrap()).unwrap(),
+            original_bytes
+        );
+
+        fs::remove_file(with_units_path.ap_get().unwrap()).unwrap();
+        fs::remove_file(without_units_path.ap_get().unwrap()).unwrap();
+        fs::remove_dir(&directory).unwrap();
+    }
+
+    /// Every field at its maximum length fits `CONFIG_FILE_MAX_BYTES` and the
+    /// read buffers, and reads back unchanged. Guards the buffer sizes when
+    /// a field or a maximum is changed.
+    #[test]
+    fn cfg_write_new_config_file_longest_values_round_trip() {
+        let longest_path = format!("/{}", "a".repeat(MAX_CONFIG_PATH_BYTES - 1));
+        let longest_config = HixConfig {
+            target_crate_path: ConfigPath::cp_new(Path::new(&longest_path)).unwrap(),
+            target_binary_name: CargoBinaryName::ntk_new(&"b".repeat(MAX_CARGO_BINARY_NAME_BYTES))
+                .unwrap(),
+            modeling_data_path: ConfigPath::cp_new(Path::new(&longest_path)).unwrap(),
+            scenario_name: ScenarioName::ntk_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES)).unwrap(),
+            analysis_purpose: AnalysisPurpose::ntk_new(&"p".repeat(MAX_ANALYSIS_PURPOSE_BYTES))
+                .unwrap(),
+            top_n: TopNCount::tnc_new(MAX_TOP_N).unwrap(),
+            work_unit_name: Some(
+                WorkUnitName::wun_new(&"w".repeat(MAX_WORK_UNIT_NAME_BYTES)).unwrap(),
+            ),
+            demangle_outputs: false,
+        };
+        let directory = unique_temp_path("cfg_longest");
+        fs::create_dir(&directory).unwrap();
+        let config_file_path = AbsolutePath::ap_new(directory.join("hix_longest.toml")).unwrap();
+
+        write_new_config_file(&config_file_path, &longest_config).unwrap();
+        assert_eq!(load_config_file(&config_file_path).unwrap(), longest_config);
+
+        fs::remove_file(config_file_path.ap_get().unwrap()).unwrap();
+        fs::remove_dir(&directory).unwrap();
+    }
+
+    /// Loading refuses each kind of bad file with its own code. Each case
+    /// changes one line of a valid file, so the code is the only difference.
+    #[test]
+    fn cfg_load_config_file_rejects_invalid_files_with_listed_codes() {
+        let valid_text = render_config_to_string(&sample_config(Some("chunks_generated")));
+        let cases: [(&str, &str, &str, HeatmapError, u16); 7] = [
+            (
+                "duplicate key",
+                "top_n = 15\n",
+                "top_n = 15\ntop_n = 16\n",
+                HeatmapError::RSLFDuplicateKey,
+                816,
+            ),
+            (
+                "version not a number",
+                "hix_config_version = 1\n",
+                "hix_config_version = one\n",
+                HeatmapError::CfgVersionNotANumber,
+                831,
+            ),
+            (
+                "unsupported version",
+                "hix_config_version = 1\n",
+                "hix_config_version = 2\n",
+                HeatmapError::CfgUnsupportedVersion,
+                832,
+            ),
+            (
+                "missing required key",
+                "scenario_name = \"pumpkin_world_spawn\"\n",
+                "",
+                HeatmapError::RSLFFieldNotFound,
+                811,
+            ),
+            (
+                "relative path",
+                "target_crate_path = \"/home/user/code/Pumpkin\"\n",
+                "target_crate_path = \"relative/Pumpkin\"\n",
+                HeatmapError::CfgPathNotAbsolute,
+                817,
+            ),
+            (
+                "top_n out of range",
+                "top_n = 15\n",
+                "top_n = 0\n",
+                HeatmapError::CfgTopNInvalid,
+                833,
+            ),
+            (
+                "bad boolean",
+                "demangle_outputs = true\n",
+                "demangle_outputs = yes\n",
+                HeatmapError::CfgBooleanInvalid,
+                834,
+            ),
+        ];
+        for (
+            case_index,
+            (case_label, original_line, replacement_text, expected_error, expected_code),
+        ) in cases.iter().enumerate()
+        {
+            assert!(
+                valid_text.contains(original_line),
+                "{}: line to change is missing",
+                case_label
+            );
+            let bad_text = valid_text.replacen(original_line, replacement_text, 1);
+            let (directory, config_file_path) =
+                write_temp_config_text(&format!("cfg_load_reject_{}", case_index), &bad_text);
+            let error = load_config_file(&config_file_path).unwrap_err();
+            remove_temp_config(&directory, &config_file_path);
+            assert_eq!(error, *expected_error, "{}", case_label);
+            assert_eq!(error.code(), *expected_code, "{}", case_label);
+        }
+    }
+
+    /// Hand edits that stay within the format are accepted: spaces around
+    /// numbers and booleans, extra comments and blank lines, and unknown keys.
+    #[test]
+    fn cfg_load_config_file_accepts_hand_edited_spacing_and_comments() {
+        let valid_text = render_config_to_string(&sample_config(None));
+        let edited_text = valid_text
+            .replacen("top_n = 15\n", "top_n =   15  \n", 1)
+            .replacen(
+                "demangle_outputs = true\n",
+                "\n# note\ndemangle_outputs = true \n",
+                1,
+            )
+            + "unknown_future_key = \"ignored\"\n";
+        let (directory, config_file_path) = write_temp_config_text("cfg_hand_edited", &edited_text);
+        let loaded = load_config_file(&config_file_path).unwrap();
+        remove_temp_config(&directory, &config_file_path);
+        assert_eq!(loaded, sample_config(None));
+    }
+
+    /// The config file name is `hix_<scenario>.toml`.
+    #[test]
+    fn cfg_config_file_name_for_scenario_builds_name() {
+        let scenario_name = ScenarioName::ntk_new("pumpkin_world_spawn").unwrap();
+        assert_eq!(
+            config_file_name_for_scenario(&scenario_name).unwrap(),
+            "hix_pumpkin_world_spawn.toml"
+        );
     }
 }

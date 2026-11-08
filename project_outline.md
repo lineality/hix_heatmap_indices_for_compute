@@ -1,12 +1,18 @@
 # HIX Heatmap Indices for Compute (Project Outline)
 *"Somebody wakeup HIX."*
 
-### Liebig-Barrel, Physical, Data, Time, Memory, Behavior, Code, Compilation, Compute, Riparian Modeling
+##### 2026.11.01-... Geoffrey Gordon Ashbrook
+
+### Liebig-Barrel, Time, Memory, Behavior, Code, Compilation, Compute, Riparian Data, Physical Modeling
 
 hix_heatmap_indices_for_compute.rs
 hix.exe
 
-##### 2026.11.01-... Geoffrey Gordon Ashbrook
+
+
+
+What contexts should be landscaped so as to make descriptions and evaluations of performance, and arguments for or against optimization, meaningful?
+
 
 
 #### Preamble Notes:
@@ -15,7 +21,7 @@ hix.exe
 
 - Holzmann: https://spinroot.com/gerard/pdf/P10.pdf 
 
-- HIX is currently focused on the Rust-language. This is a broader topic and needs that can be (e.g. for comparison-planning-design discussion) expanded for odin-lang, zig-lang, c, cpp, etc.
+- HIX is currently focused on the Rust-language. The overall scope is a broader topic and can be (e.g. for comparison-planning-design discussion) expanded for odin-lang, zig-lang, c, cpp, etc.
 
 
 
@@ -23,7 +29,11 @@ hix.exe
 
 Goal: A tool-set to analyze and report on code performance behavior to be able to improve code design.
 
-Part of the context here is what might be seen as an array of ~modes, styles, and contexts, comparing and combining modes of what might be described as Development-Modes of code with (what might be described as) Implementation/Context type "modes."  By visualizing this design/development/deployment/improvement/maintenance problem-space landscape, we might be able to better focus on various needs and goals and their priorities. For example, what information/data are we using to navigate and decide within this problem space? This array can be seen as a data-information-question array: Do data compellingly suggest that there is work to be done (or not) in any of these areas? What are leads to look at? What are 'smoking guns'? Etc. What is ambiguous? What are tradeoffs, etc? 
+Part of the context here is what might be seen as an array of ~modes, styles, and contexts, comparing and combining modes of what might be described as Development-Modes of code with (what might be described as) Implementation/Context type "modes." This is of course a cartoonish simplification of many more factors and contexts (such as hardware and stack, embedded or 'systems programming', virtualized and cloud, etc., but sometimes having a universally discussable place to start holds sufficient merit to warrant.
+
+By visualizing this design/development/deployment/improvement/maintenance problem-space landscape, we might be able to better focus on various needs and goals and their priorities. For example, what information/data are we using to navigate and decide within this problem space? This array can be seen as a data-information-question array: Do data compellingly suggest that there is work to be done (or not) in any of these areas? What are leads to more deeply investigate? What are 'smoking guns'? Etc. What is ambiguous? What are tradeoffs, etc? 
+
+For example, what might at first seem trivial can quickly become an endless Escher labyrinth. You might wonder why Test vs. Debug Vs. Production is phylo-taxically split? [phylogeny/taxonomy, 'lumpers and splitters'] Isn't everyone interested in production-performance? Interesting question: Strangely, virtually no-one is interested in production-performance though the novitiate insight (appraising the emperor's wardrobe) is likely spot on: performance should matter. That's one pin in the case-map. But much software is used and continually developed for 'in-house' use (R&D, internal use, POC, etc), which means it may live largely in the 'debug' and testing categories, which can have different desired priorities, and all of this may shift over time; not seeing and planning where you are and will be in this large possible array of problem spaces may lead to oversights and miscommunications.  
 
 | Implementation-Context Mode | Test / Analysis Mode | Debug Mode | Production Release Mode |
 | :--- | :--- | :--- | :--- |
@@ -31,7 +41,7 @@ Part of the context here is what might be seen as an array of ~modes, styles, an
 | **2. Secure & Hot Regions Mode** | | | |
 | **3. Multi-Core, Multi-Thread, Scale-Dependent Mode** | | | |
 | **4. Stateless Parallel Lambda-Mode** *(e.g., Erlang-style for high telecom-scale)* | | | |
-| **5. GPU / TPU / _PU Parallel Mode** | | | |
+| **5. GPU / TPU / NPU / {whatever}PU Parallel Mode** | | | |
 
 
 #### X axis: Holzmann-Type Development-Modes
@@ -40,17 +50,16 @@ Part of the context here is what might be seen as an array of ~modes, styles, an
 2. Debug Mode
 3. Production Release Mode
 
+
 #### Y Axis: Implementation-Context Modes
 
 1. Classic Single-Thread, Single-Core, Scale-less Generic-Uniform-Load Mode: maximizing stack pre-allocation, minimizing heap allocation, etc.
 2. Secure & Hot Regions Mode: Branchless conditionals, cache management, prediction-anticipation management, loop unrolling, optimized types and calculations, inline/naked assembly language, etc. 
 3. Multi-Core, Multi-Thread, Scale-Dependent Mode
 4. Stateless Parallel (CPU ?) Lambda-Mode (Where scale justifies creating maybe like erlang for telecom industry)
-5. GPU/TPU/_PU Parallel Mode: Cuda Kernals & PTX, AMD ROCm, etc.; unified memory systems, etc. 
+5. _PU Parallel Mode: Cuda Kernels & PTX, AMD ROCm, etc.; unified memory systems, etc. 
 
 (x and y are arbitrary here.)
-
-
 
 In this context, this idea is to (baby steps from crude starting point) explore systems, focusing on Rust, to get eval/analytics numbers on such things as:
 
@@ -65,7 +74,6 @@ The 'indices' aspect of this, beyond providing various raw-data for human interp
 2. Time-Heat-Index Per Loop & Function
 3. Some Count Heat Function(s) Per Loop & Function
 4. Inner-Element-Heat within Notable Loops & Functions
-
 
 
 
@@ -550,6 +558,9 @@ About Perf & Permissions:
 - 3. wizard can report if perf_event_paranoid has not been set, e.g. "Do this first, then it can run."
 - 4. Wizard can detect full-sudo and halt: "Oh no, do not run this under sudo; instead, configure perf_event_paranoid and then after that run HIX not-using-sudo."
 
+Wiz-Commands: User-commands are run in Bash using std::process::Command
+
+Probably a default Q&A asking user to indicate when processes start-stop, depending on what can be otherwise detected more precisely.
 
 5. Time/duration of test probably should be included...
 
@@ -558,6 +569,11 @@ About Perf & Permissions:
 7. No Yard Sale: All run/modeling files should be placed in / accessed from some standard dir such /modeling_data/ that is safely git-ignored
 
 8. Ideally any data-visualization in reports does not use any 3rd party libraries, simple ascii version is highly practical (and terminal friendly).
+
+9. Three ways to use/run HIX:
+- Manual, A-la-carte: cli, step by step, a-la-carte
+- Wizard: guided interactive (can be new or replay)
+- Automated-Replay: uses config file(s), no Wizard (e.g. for fully automated workflows)
 
 
 # MVP-N Scope (not MVP-1)
