@@ -115,10 +115,17 @@
 //! Heap is used for analysis data (unavoidable for variable-size input),
 //! capped by the `MAX_*` constants. The error path never allocates.
 //!
+//! ## Config files
+//! A config file (`config_files/hix_<scenario>.toml`, kept next to
+//! `modeling_data/`) holds what is needed to repeat a run: the target crate
+//! and binary, the `modeling_data` folder, the scenario name, and analysis
+//! options. It is written create-new (never overwritten), then read back and
+//! compared before it is used. It is read with the no-heap field-reader
+//! described below. Keys and reading rules: see the "HIX config files" section.
 //!
 //! # Config File TOML Reading:
-//! ### From: read_toml_single_line_string_field_no_heap.rs
-//! Functionality: Read Single Line String Field = rslsf
+//! ### From: read_toml_single_line_field_no_heap.rs
+//! Functionality: Read Single Line Field = RSLF
 //!
 //! ## Error/Mode Policy:
 //! https://github.com/lineality/rust_lang_rules
@@ -133,7 +140,7 @@
 //! that given keys appear at most once in the file.
 //!
 //! ## Public functions
-//! - `read_single_line_string_field_from_toml_no_heap::<N>(path, key)`:
+//! - `read_single_line_field_from_toml_no_heap::<N>(path, key)`:
 //!   returns the value of the first line that assigns `key`, in an `N`-byte
 //!   stack array, plus the number of meaningful bytes.
 //! - `count_toml_key_lines_no_heap(path, key)`: number of lines that assign `key`.
@@ -193,7 +200,7 @@
 //! The scanner works on any `Read`; the public functions give it an
 //! unbuffered `File`, and tests give it in-memory input.
 //!
-//! ## RSLSF Error codes
+//! ## RSLF Error codes
 //! Codes 801-816 are used; 817-849 are reserved for the matching config
 //! writer. Numbers range from 800-849 so that they may often be kept
 //! unchanged when this module is merged into a parent project in development.
@@ -226,6 +233,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ============================================================================
@@ -490,23 +498,23 @@ pub enum HeatmapError {
     // 800-849: TOML/Config file read/write
     // 800-816: for toml/config writer reader
     // 817-849: for the toml/config writer
-    // Functionality: Read Single Line String Field = rslsf
-    RsLsfEmptyKey = 801,
-    RsLsfOutputBufferZeroSized = 802,
-    RsLsfPathNotAbsolute = 803,
-    RsLsfOpenNotFound = 804,
-    RsLsfOpenPermissionDenied = 805,
-    RsLsfOpenTransient = 806,
-    RsLsfOpenOther = 807,
-    RsLsfReadFailed = 808,
-    RsLsfReadCallLimitReached = 809,
-    RsLsfFileExceedsScanLimit = 810,
-    RsLsfFieldNotFound = 811,
-    RsLsfValueExceedsOutputBuffer = 812,
-    RsLsfValueUnterminatedAtEndOfFile = 813,
-    RsLsfKeyMatchIndexInvalid = 814,
-    RsLsfScanOutcomeMismatch = 815,
-    RsLsfDuplicateKey = 816,
+    // Functionality: Read Single Line Field = RSLF
+    RSLFEmptyKey = 801,
+    RSLFOutputBufferZeroSized = 802,
+    RSLFPathNotAbsolute = 803,
+    RSLFOpenNotFound = 804,
+    RSLFOpenPermissionDenied = 805,
+    RSLFOpenTransient = 806,
+    RSLFOpenOther = 807,
+    RSLFReadFailed = 808,
+    RSLFReadCallLimitReached = 809,
+    RSLFFileExceedsScanLimit = 810,
+    RSLFFieldNotFound = 811,
+    RSLFValueExceedsOutputBuffer = 812,
+    RSLFValueUnterminatedAtEndOfFile = 813,
+    RSLFKeyMatchIndexInvalid = 814,
+    RSLFScanOutcomeMismatch = 815,
+    RSLFDuplicateKey = 816,
 }
 
 impl HeatmapError {
@@ -519,7 +527,7 @@ impl HeatmapError {
     /// Defined per code (exhaustive, no wildcard) so new codes force a decision.
     pub fn is_retryable(self) -> bool {
         match self {
-            HeatmapError::RsLsfOpenTransient
+            HeatmapError::RSLFOpenTransient
             | HeatmapError::LcovOpenTransient
             | HeatmapError::SrcOpenTransient
             | HeatmapError::RptOpenTransient => true,
@@ -609,21 +617,21 @@ impl HeatmapError {
             | HeatmapError::TypeWorkUnitNameInvalid
             | HeatmapError::TypeWorkUnitNameCorrupted
             | HeatmapError::LogClockBeforeEpoch
-            | HeatmapError::RsLsfEmptyKey
-            | HeatmapError::RsLsfOutputBufferZeroSized
-            | HeatmapError::RsLsfPathNotAbsolute
-            | HeatmapError::RsLsfOpenNotFound
-            | HeatmapError::RsLsfOpenPermissionDenied
-            | HeatmapError::RsLsfOpenOther
-            | HeatmapError::RsLsfReadFailed
-            | HeatmapError::RsLsfReadCallLimitReached
-            | HeatmapError::RsLsfFileExceedsScanLimit
-            | HeatmapError::RsLsfFieldNotFound
-            | HeatmapError::RsLsfValueExceedsOutputBuffer
-            | HeatmapError::RsLsfValueUnterminatedAtEndOfFile
-            | HeatmapError::RsLsfKeyMatchIndexInvalid
-            | HeatmapError::RsLsfScanOutcomeMismatch
-            | HeatmapError::RsLsfDuplicateKey => false,
+            | HeatmapError::RSLFEmptyKey
+            | HeatmapError::RSLFOutputBufferZeroSized
+            | HeatmapError::RSLFPathNotAbsolute
+            | HeatmapError::RSLFOpenNotFound
+            | HeatmapError::RSLFOpenPermissionDenied
+            | HeatmapError::RSLFOpenOther
+            | HeatmapError::RSLFReadFailed
+            | HeatmapError::RSLFReadCallLimitReached
+            | HeatmapError::RSLFFileExceedsScanLimit
+            | HeatmapError::RSLFFieldNotFound
+            | HeatmapError::RSLFValueExceedsOutputBuffer
+            | HeatmapError::RSLFValueUnterminatedAtEndOfFile
+            | HeatmapError::RSLFKeyMatchIndexInvalid
+            | HeatmapError::RSLFScanOutcomeMismatch
+            | HeatmapError::RSLFDuplicateKey => false,
         }
     }
 
@@ -786,34 +794,34 @@ impl std::fmt::Display for HeatmapError {
             HeatmapError::LogOpenFailed => "error log open failed",
             HeatmapError::LogWriteFailed => "error log write failed",
             HeatmapError::LogClockBeforeEpoch => "system clock is before UNIX epoch",
-            HeatmapError::RsLsfEmptyKey => "key is empty",
-            HeatmapError::RsLsfOutputBufferZeroSized => "OUTPUT_BUFFER_BYTES is 0",
-            HeatmapError::RsLsfPathNotAbsolute => "toml path is not absolute",
-            HeatmapError::RsLsfOpenNotFound => "toml file not found",
-            HeatmapError::RsLsfOpenPermissionDenied => "toml file permission denied",
-            HeatmapError::RsLsfOpenTransient => {
+            HeatmapError::RSLFEmptyKey => "key is empty",
+            HeatmapError::RSLFOutputBufferZeroSized => "OUTPUT_BUFFER_BYTES is 0",
+            HeatmapError::RSLFPathNotAbsolute => "toml path is not absolute",
+            HeatmapError::RSLFOpenNotFound => "toml file not found",
+            HeatmapError::RSLFOpenPermissionDenied => "toml file permission denied",
+            HeatmapError::RSLFOpenTransient => {
                 "toml file open: transient error (retries exhausted)"
             }
-            HeatmapError::RsLsfOpenOther => "toml file open failed",
-            HeatmapError::RsLsfReadFailed => "toml file read failed",
-            HeatmapError::RsLsfReadCallLimitReached => {
+            HeatmapError::RSLFOpenOther => "toml file open failed",
+            HeatmapError::RSLFReadFailed => "toml file read failed",
+            HeatmapError::RSLFReadCallLimitReached => {
                 "read-call allowance used up (reads kept being interrupted)"
             }
-            HeatmapError::RsLsfFileExceedsScanLimit => "toml file exceeds RSLSF_MAX_BYTES_SCANNED",
-            HeatmapError::RsLsfFieldNotFound => "no line assigns the key",
-            HeatmapError::RsLsfValueExceedsOutputBuffer => {
+            HeatmapError::RSLFFileExceedsScanLimit => "toml file exceeds RSLF_MAX_BYTES_SCANNED",
+            HeatmapError::RSLFFieldNotFound => "no line assigns the key",
+            HeatmapError::RSLFValueExceedsOutputBuffer => {
                 "value longer than the output buffer; refusing to truncate"
             }
-            HeatmapError::RsLsfValueUnterminatedAtEndOfFile => {
+            HeatmapError::RSLFValueUnterminatedAtEndOfFile => {
                 "end of file inside a value (no closing quote or no newline)"
             }
-            HeatmapError::RsLsfKeyMatchIndexInvalid => {
+            HeatmapError::RSLFKeyMatchIndexInvalid => {
                 "key-match position outside the key (internal invariant)"
             }
-            HeatmapError::RsLsfScanOutcomeMismatch => {
+            HeatmapError::RSLFScanOutcomeMismatch => {
                 "scan returned the other goal's result (internal invariant)"
             }
-            HeatmapError::RsLsfDuplicateKey => "a checked key is assigned on more than one line",
+            HeatmapError::RSLFDuplicateKey => "a checked key is assigned on more than one line",
         };
         write!(formatter, "HIX-{}: {}", self.code(), description)
     }
@@ -822,6 +830,7 @@ impl std::fmt::Display for HeatmapError {
 // ============================================================================
 // TOML - Config File Reading
 // ============================================================================
+// RSLF: Read Single Line Field
 // ============================================================================
 // Constants (every loop is bounded by these)
 // ============================================================================
@@ -830,7 +839,7 @@ impl std::fmt::Display for HeatmapError {
 ///
 /// Far above any config file in scope. A larger file stops the scan with
 /// code 810 instead of running unbounded work on unexpected input.
-pub const RSLSF_MAX_BYTES_SCANNED: u64 = 1 << 20;
+pub const RSLF_MAX_BYTES_SCANNED: u64 = 1 << 20;
 
 /// Extra read calls allowed for "interrupted" reads (the OS asks the
 /// program to try again; nothing is read).
@@ -838,13 +847,13 @@ pub const RSLSF_MAX_BYTES_SCANNED: u64 = 1 << 20;
 /// Every other read call either reads one byte or reports end of file, so
 /// the byte limit already bounds those. This allowance keeps the scan loop
 /// finite even if a reader reports "interrupted" forever (code 809).
-const RSLSF_EXTRA_READ_CALLS: u64 = 1024;
+const RSLF_EXTRA_READ_CALLS: u64 = 1024;
 
 /// Tier-1 retry: maximum attempts to open the file on transient errors.
-const RSLSF_MAX_OPEN_ATTEMPTS: u32 = 3;
+const RSLF_MAX_OPEN_ATTEMPTS: u32 = 3;
 
 /// Tier-1 retry: backoff step in milliseconds (retry n sleeps n * step).
-const RSLSF_OPEN_RETRY_BACKOFF_STEP_MS: u64 = 50;
+const RSLF_OPEN_RETRY_BACKOFF_STEP_MS: u64 = 50;
 
 // ============================================================================
 // Scanner types
@@ -908,7 +917,7 @@ struct ScanContext<'key, 'buffer> {
     /// (written). Avoids needing a look-ahead buffer.
     unquoted_value_has_pending_cr: bool,
     /// Count goal: lines that assign the key so far. Cannot reach
-    /// `u32::MAX`: the file is capped at `RSLSF_MAX_BYTES_SCANNED` bytes.
+    /// `u32::MAX`: the file is capped at `RSLF_MAX_BYTES_SCANNED` bytes.
     key_line_count: u32,
 }
 
@@ -917,7 +926,7 @@ impl ScanContext<'_, '_> {
     ///
     /// # Returns
     /// - `Ok(())`.
-    /// - `Err(RsLsfValueExceedsOutputBuffer)` (input validation): the value is
+    /// - `Err(RSLFValueExceedsOutputBuffer)` (input validation): the value is
     ///   longer than the output buffer. Nothing is truncated; the caller gets
     ///   no partial value.
     fn push_value_byte(&mut self, value_byte: u8) -> Result<(), HeatmapError> {
@@ -927,10 +936,10 @@ impl ScanContext<'_, '_> {
                 #[cfg(debug_assertions)]
                 eprintln!(
                     "HIX-{}: value longer than output buffer of {} bytes",
-                    HeatmapError::RsLsfValueExceedsOutputBuffer.code(),
+                    HeatmapError::RSLFValueExceedsOutputBuffer.code(),
                     self.output_buffer.len()
                 );
-                return Err(HeatmapError::RsLsfValueExceedsOutputBuffer);
+                return Err(HeatmapError::RSLFValueExceedsOutputBuffer);
             }
         }
         // Cannot overflow: write_cursor < output_buffer.len() was just confirmed.
@@ -973,7 +982,7 @@ impl ScanContext<'_, '_> {
 /// # Modes
 /// Debug builds print diagnostics (may include path and key); 801 and 802
 /// also panic in debug builds (not test). Production-release returns codes only.
-pub fn read_single_line_string_field_from_toml_no_heap<const OUTPUT_BUFFER_BYTES: usize>(
+pub fn read_single_line_field_from_toml_no_heap<const OUTPUT_BUFFER_BYTES: usize>(
     absolute_toml_file_path: &Path,
     target_field_key: &str,
 ) -> Result<([u8; OUTPUT_BUFFER_BYTES], usize), HeatmapError> {
@@ -984,14 +993,14 @@ pub fn read_single_line_string_field_from_toml_no_heap<const OUTPUT_BUFFER_BYTES
         debug_assert!(
             false,
             "HIX-{}: OUTPUT_BUFFER_BYTES is 0",
-            HeatmapError::RsLsfOutputBufferZeroSized.code()
+            HeatmapError::RSLFOutputBufferZeroSized.code()
         );
         #[cfg(debug_assertions)]
         eprintln!(
             "HIX-{}: OUTPUT_BUFFER_BYTES is 0",
-            HeatmapError::RsLsfOutputBufferZeroSized.code()
+            HeatmapError::RSLFOutputBufferZeroSized.code()
         );
-        return Err(HeatmapError::RsLsfOutputBufferZeroSized);
+        return Err(HeatmapError::RSLFOutputBufferZeroSized);
     }
 
     let mut toml_file = open_toml_file_for_scan(absolute_toml_file_path, target_field_key)?;
@@ -1048,7 +1057,7 @@ pub fn count_toml_key_lines_no_heap(
 ///
 /// # Returns
 /// - `Ok(())`: every listed key appears at most once.
-/// - `Err(RsLsfDuplicateKey)` (816, input validation): some key appears more
+/// - `Err(RSLFDuplicateKey)` (816, input validation): some key appears more
 ///   than once. The code carries no key; a caller that needs to know which key
 ///   can call `count_toml_key_lines_no_heap` per key. Debug builds print the key.
 /// - Any error from `count_toml_key_lines_no_heap`, unchanged.
@@ -1063,12 +1072,12 @@ pub fn check_toml_keys_are_unique_no_heap(
             #[cfg(debug_assertions)]
             eprintln!(
                 "HIX-{}: key {:?} assigned on {} lines in {}",
-                HeatmapError::RsLsfDuplicateKey.code(),
+                HeatmapError::RSLFDuplicateKey.code(),
                 target_field_key,
                 key_line_count,
                 absolute_toml_file_path.display()
             );
-            return Err(HeatmapError::RsLsfDuplicateKey);
+            return Err(HeatmapError::RSLFDuplicateKey);
         }
     }
     Ok(())
@@ -1083,8 +1092,8 @@ pub fn check_toml_keys_are_unique_no_heap(
 ///
 /// # Returns
 /// - `Ok(File)`: unbuffered on purpose (one byte per read call; no heap buffer).
-/// - `Err(RsLsfEmptyKey)` (internal invariant: callers pass constant keys).
-/// - `Err(RsLsfPathNotAbsolute)` (input validation).
+/// - `Err(RSLFEmptyKey)` (internal invariant: callers pass constant keys).
+/// - `Err(RSLFPathNotAbsolute)` (input validation).
 /// - `Err(804 | 805 | 806 | 807)` from `open_toml_file_with_retry`.
 fn open_toml_file_for_scan(
     absolute_toml_file_path: &Path,
@@ -1097,11 +1106,11 @@ fn open_toml_file_for_scan(
         debug_assert!(
             false,
             "HIX-{}: empty key",
-            HeatmapError::RsLsfEmptyKey.code()
+            HeatmapError::RSLFEmptyKey.code()
         );
         #[cfg(debug_assertions)]
-        eprintln!("HIX-{}: empty key", HeatmapError::RsLsfEmptyKey.code());
-        return Err(HeatmapError::RsLsfEmptyKey);
+        eprintln!("HIX-{}: empty key", HeatmapError::RSLFEmptyKey.code());
+        return Err(HeatmapError::RSLFEmptyKey);
     }
 
     // --- Check: path is absolute ---
@@ -1110,10 +1119,10 @@ fn open_toml_file_for_scan(
         #[cfg(debug_assertions)]
         eprintln!(
             "HIX-{}: not absolute: {}",
-            HeatmapError::RsLsfPathNotAbsolute.code(),
+            HeatmapError::RSLFPathNotAbsolute.code(),
             absolute_toml_file_path.display()
         );
-        return Err(HeatmapError::RsLsfPathNotAbsolute);
+        return Err(HeatmapError::RSLFPathNotAbsolute);
     }
 
     open_toml_file_with_retry(absolute_toml_file_path)
@@ -1124,26 +1133,26 @@ fn open_toml_file_for_scan(
 /// Kinds not listed are "other" (807), which is non-retryable by policy.
 fn classify_toml_open_error(io_error_kind: std::io::ErrorKind) -> HeatmapError {
     match io_error_kind {
-        std::io::ErrorKind::NotFound => HeatmapError::RsLsfOpenNotFound,
-        std::io::ErrorKind::PermissionDenied => HeatmapError::RsLsfOpenPermissionDenied,
+        std::io::ErrorKind::NotFound => HeatmapError::RSLFOpenNotFound,
+        std::io::ErrorKind::PermissionDenied => HeatmapError::RSLFOpenPermissionDenied,
         std::io::ErrorKind::Interrupted
         | std::io::ErrorKind::WouldBlock
-        | std::io::ErrorKind::TimedOut => HeatmapError::RsLsfOpenTransient,
+        | std::io::ErrorKind::TimedOut => HeatmapError::RSLFOpenTransient,
         // Required wildcard: io::ErrorKind is #[non_exhaustive].
-        _ => HeatmapError::RsLsfOpenOther,
+        _ => HeatmapError::RSLFOpenOther,
     }
 }
 
 /// Opens the file read-only, retrying transient failures (Tier 1).
 ///
-/// Up to `RSLSF_MAX_OPEN_ATTEMPTS` attempts; retry n sleeps
-/// n * `RSLSF_OPEN_RETRY_BACKOFF_STEP_MS`. Non-retryable codes return at once.
+/// Up to `RSLF_MAX_OPEN_ATTEMPTS` attempts; retry n sleeps
+/// n * `RSLF_OPEN_RETRY_BACKOFF_STEP_MS`. Non-retryable codes return at once.
 ///
 /// # Returns
 /// - `Ok(File)`.
 /// - `Err(804 | 805 | 806 | 807)`.
 fn open_toml_file_with_retry(absolute_toml_file_path: &Path) -> Result<File, HeatmapError> {
-    for attempt_index in 0..RSLSF_MAX_OPEN_ATTEMPTS {
+    for attempt_index in 0..RSLF_MAX_OPEN_ATTEMPTS {
         match File::open(absolute_toml_file_path) {
             Ok(opened_file) => return Ok(opened_file),
             Err(io_error) => {
@@ -1161,17 +1170,17 @@ fn open_toml_file_with_retry(absolute_toml_file_path: &Path) -> Result<File, Hea
                 }
                 // Last attempt failed: the result is decided, so do not sleep.
                 let next_attempt_index = attempt_index.saturating_add(1);
-                if next_attempt_index >= RSLSF_MAX_OPEN_ATTEMPTS {
+                if next_attempt_index >= RSLF_MAX_OPEN_ATTEMPTS {
                     return Err(error_code);
                 }
                 let backoff_milliseconds =
-                    RSLSF_OPEN_RETRY_BACKOFF_STEP_MS.saturating_mul(u64::from(next_attempt_index));
+                    RSLF_OPEN_RETRY_BACKOFF_STEP_MS.saturating_mul(u64::from(next_attempt_index));
                 std::thread::sleep(Duration::from_millis(backoff_milliseconds));
             }
         }
     }
-    // Reached only if RSLSF_MAX_OPEN_ATTEMPTS is 0 (no attempt was made).
-    Err(HeatmapError::RsLsfOpenTransient)
+    // Reached only if RSLF_MAX_OPEN_ATTEMPTS is 0 (no attempt was made).
+    Err(HeatmapError::RSLFOpenTransient)
 }
 
 // ============================================================================
@@ -1185,13 +1194,13 @@ fn open_toml_file_with_retry(absolute_toml_file_path: &Path) -> Result<File, Hea
 ///    Any other read error: 808.
 /// 2. End of input: finish according to goal and state
 ///    (`finish_scan_at_end_of_input`).
-/// 3. Count the byte; more than `RSLSF_MAX_BYTES_SCANNED` bytes: 810.
+/// 3. Count the byte; more than `RSLF_MAX_BYTES_SCANNED` bytes: 810.
 /// 4. Apply the byte to the state machine (`apply_byte_to_scan`); stop if
 ///    the copy goal has its value.
 ///
-/// Loop bound: at most `RSLSF_MAX_BYTES_SCANNED + 1` byte reads (the last
+/// Loop bound: at most `RSLF_MAX_BYTES_SCANNED + 1` byte reads (the last
 /// one triggers 810) plus one end-of-input read, plus
-/// `RSLSF_EXTRA_READ_CALLS` interrupted reads. Reaching the bound: 809.
+/// `RSLF_EXTRA_READ_CALLS` interrupted reads. Reaching the bound: 809.
 ///
 /// # Arguments
 /// - `toml_reader`: an unbuffered `File` in production; in-memory input in tests.
@@ -1218,9 +1227,9 @@ fn scan_toml_reader_for_key<R: Read>(
     };
     let mut single_byte_scratch: [u8; 1] = [0u8; 1];
     let mut bytes_scanned: u64 = 0;
-    let maximum_read_calls = RSLSF_MAX_BYTES_SCANNED
+    let maximum_read_calls = RSLF_MAX_BYTES_SCANNED
         .saturating_add(2)
-        .saturating_add(RSLSF_EXTRA_READ_CALLS);
+        .saturating_add(RSLF_EXTRA_READ_CALLS);
 
     for _read_call_index in 0..maximum_read_calls {
         let bytes_read = match toml_reader.read(&mut single_byte_scratch) {
@@ -1230,10 +1239,10 @@ fn scan_toml_reader_for_key<R: Read>(
                 #[cfg(debug_assertions)]
                 eprintln!(
                     "HIX-{}: read failed: {}",
-                    HeatmapError::RsLsfReadFailed.code(),
+                    HeatmapError::RSLFReadFailed.code(),
                     _io_error
                 );
-                return Err(HeatmapError::RsLsfReadFailed);
+                return Err(HeatmapError::RSLFReadFailed);
             }
         };
         if bytes_read == 0 {
@@ -1241,14 +1250,14 @@ fn scan_toml_reader_for_key<R: Read>(
         }
 
         bytes_scanned = bytes_scanned.saturating_add(1);
-        if bytes_scanned > RSLSF_MAX_BYTES_SCANNED {
+        if bytes_scanned > RSLF_MAX_BYTES_SCANNED {
             #[cfg(debug_assertions)]
             eprintln!(
                 "HIX-{}: file exceeds {} bytes",
-                HeatmapError::RsLsfFileExceedsScanLimit.code(),
-                RSLSF_MAX_BYTES_SCANNED
+                HeatmapError::RSLFFileExceedsScanLimit.code(),
+                RSLF_MAX_BYTES_SCANNED
             );
-            return Err(HeatmapError::RsLsfFileExceedsScanLimit);
+            return Err(HeatmapError::RSLFFileExceedsScanLimit);
         }
 
         let [current_byte] = single_byte_scratch;
@@ -1260,10 +1269,10 @@ fn scan_toml_reader_for_key<R: Read>(
     #[cfg(debug_assertions)]
     eprintln!(
         "HIX-{}: read-call limit {} reached",
-        HeatmapError::RsLsfReadCallLimitReached.code(),
+        HeatmapError::RSLFReadCallLimitReached.code(),
         maximum_read_calls
     );
-    Err(HeatmapError::RsLsfReadCallLimitReached)
+    Err(HeatmapError::RSLFReadCallLimitReached)
 }
 
 /// Applies one input byte to the state machine.
@@ -1271,8 +1280,8 @@ fn scan_toml_reader_for_key<R: Read>(
 /// # Returns
 /// - `Ok(None)`: keep scanning.
 /// - `Ok(Some(ValueCopied))`: copy goal finished (value terminated).
-/// - `Err(RsLsfValueExceedsOutputBuffer)`: value longer than the buffer.
-/// - `Err(RsLsfKeyMatchIndexInvalid)`: internal invariant (see `match_key_byte`).
+/// - `Err(RSLFValueExceedsOutputBuffer)`: value longer than the buffer.
+/// - `Err(RSLFKeyMatchIndexInvalid)`: internal invariant (see `match_key_byte`).
 fn apply_byte_to_scan(
     scan: &mut ScanContext<'_, '_>,
     current_byte: u8,
@@ -1374,7 +1383,7 @@ fn apply_byte_to_scan(
 /// - `Ok(MatchingKey { n + 1 })`: matched, key not complete yet.
 /// - `Ok(AtLineStart)`: mismatch on `\n` (short line).
 /// - `Ok(SkippingToEndOfLine)`: any other mismatch.
-/// - `Err(RsLsfKeyMatchIndexInvalid)`: `matched_key_bytes` is outside the key.
+/// - `Err(RSLFKeyMatchIndexInvalid)`: `matched_key_bytes` is outside the key.
 ///   Internal invariant: the state machine only stores positions < key length
 ///   (an empty key is rejected before scanning).
 fn match_key_byte(
@@ -1389,18 +1398,18 @@ fn match_key_byte(
             debug_assert!(
                 false,
                 "HIX-{}: key-match position {} outside key of {} bytes",
-                HeatmapError::RsLsfKeyMatchIndexInvalid.code(),
+                HeatmapError::RSLFKeyMatchIndexInvalid.code(),
                 matched_key_bytes,
                 key_bytes.len()
             );
             #[cfg(debug_assertions)]
             eprintln!(
                 "HIX-{}: key-match position {} outside key of {} bytes",
-                HeatmapError::RsLsfKeyMatchIndexInvalid.code(),
+                HeatmapError::RSLFKeyMatchIndexInvalid.code(),
                 matched_key_bytes,
                 key_bytes.len()
             );
-            return Err(HeatmapError::RsLsfKeyMatchIndexInvalid);
+            return Err(HeatmapError::RSLFKeyMatchIndexInvalid);
         }
     };
 
@@ -1426,8 +1435,8 @@ fn match_key_byte(
 /// # Returns
 /// - Count goal: `Ok(KeyLinesCounted)` in any state.
 /// - Copy goal, inside a value or right after `=`:
-///   `Err(RsLsfValueUnterminatedAtEndOfFile)` (input validation).
-/// - Copy goal, any other state: `Err(RsLsfFieldNotFound)` (input validation).
+///   `Err(RSLFValueUnterminatedAtEndOfFile)` (input validation).
+/// - Copy goal, any other state: `Err(RSLFFieldNotFound)` (input validation).
 fn finish_scan_at_end_of_input(scan: &ScanContext<'_, '_>) -> Result<ScanOutcome, HeatmapError> {
     match scan.scan_goal {
         ScanGoal::CountKeyLines => Ok(ScanOutcome::KeyLinesCounted {
@@ -1440,10 +1449,10 @@ fn finish_scan_at_end_of_input(scan: &ScanContext<'_, '_>) -> Result<ScanOutcome
                 #[cfg(debug_assertions)]
                 eprintln!(
                     "HIX-{}: end of file inside value of key {:?}",
-                    HeatmapError::RsLsfValueUnterminatedAtEndOfFile.code(),
+                    HeatmapError::RSLFValueUnterminatedAtEndOfFile.code(),
                     String::from_utf8_lossy(scan.key_bytes)
                 );
-                Err(HeatmapError::RsLsfValueUnterminatedAtEndOfFile)
+                Err(HeatmapError::RSLFValueUnterminatedAtEndOfFile)
             }
             LineScanState::AtLineStart
             | LineScanState::SkippingLeadingWhitespace
@@ -1454,17 +1463,17 @@ fn finish_scan_at_end_of_input(scan: &ScanContext<'_, '_>) -> Result<ScanOutcome
                 #[cfg(debug_assertions)]
                 eprintln!(
                     "HIX-{}: key {:?} not found",
-                    HeatmapError::RsLsfFieldNotFound.code(),
+                    HeatmapError::RSLFFieldNotFound.code(),
                     String::from_utf8_lossy(scan.key_bytes)
                 );
-                Err(HeatmapError::RsLsfFieldNotFound)
+                Err(HeatmapError::RSLFFieldNotFound)
             }
         },
     }
 }
 
 /// Extracts the value length from a copy-goal outcome.
-/// `Err(RsLsfScanOutcomeMismatch)`: internal invariant (a count result
+/// `Err(RSLFScanOutcomeMismatch)`: internal invariant (a count result
 /// returned for a copy scan).
 fn copied_value_length_from_outcome(scan_outcome: ScanOutcome) -> Result<usize, HeatmapError> {
     match scan_outcome {
@@ -1474,20 +1483,20 @@ fn copied_value_length_from_outcome(scan_outcome: ScanOutcome) -> Result<usize, 
             debug_assert!(
                 false,
                 "HIX-{}: copy scan returned a count",
-                HeatmapError::RsLsfScanOutcomeMismatch.code()
+                HeatmapError::RSLFScanOutcomeMismatch.code()
             );
             #[cfg(debug_assertions)]
             eprintln!(
                 "HIX-{}: copy scan returned a count",
-                HeatmapError::RsLsfScanOutcomeMismatch.code()
+                HeatmapError::RSLFScanOutcomeMismatch.code()
             );
-            Err(HeatmapError::RsLsfScanOutcomeMismatch)
+            Err(HeatmapError::RSLFScanOutcomeMismatch)
         }
     }
 }
 
 /// Extracts the key-line count from a count-goal outcome.
-/// `Err(RsLsfScanOutcomeMismatch)`: internal invariant (a copied value
+/// `Err(RSLFScanOutcomeMismatch)`: internal invariant (a copied value
 /// returned for a count scan).
 fn key_line_count_from_outcome(scan_outcome: ScanOutcome) -> Result<u32, HeatmapError> {
     match scan_outcome {
@@ -1497,14 +1506,14 @@ fn key_line_count_from_outcome(scan_outcome: ScanOutcome) -> Result<u32, Heatmap
             debug_assert!(
                 false,
                 "HIX-{}: count scan returned a value",
-                HeatmapError::RsLsfScanOutcomeMismatch.code()
+                HeatmapError::RSLFScanOutcomeMismatch.code()
             );
             #[cfg(debug_assertions)]
             eprintln!(
                 "HIX-{}: count scan returned a value",
-                HeatmapError::RsLsfScanOutcomeMismatch.code()
+                HeatmapError::RSLFScanOutcomeMismatch.code()
             );
-            Err(HeatmapError::RsLsfScanOutcomeMismatch)
+            Err(HeatmapError::RSLFScanOutcomeMismatch)
         }
     }
 }
@@ -1530,11 +1539,11 @@ longtext = "productionproductionproductionproductionproductionproductionproducti
 /// `std::env::temp_dir()` and remove them at the end; if such a test fails
 /// mid-way its file may remain (harmless, unique name).
 ///
-/// Test names: `rslsf_<area>_<condition>[_with_code_<nnn>]`.
+/// Test names: `rslf_<area>_<condition>[_with_code_<nnn>]`.
 /// Areas: `scan`, `count`, `read`, `unique`, `err`, `guard`.
 /// `unwrap`/`assert!`/indexing are allowed here (test mode).
 #[cfg(test)]
-mod read_toml_single_line_string_field_no_heap_tests {
+mod read_toml_single_line_field_no_heap_tests {
     use super::*;
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -1584,7 +1593,7 @@ mod read_toml_single_line_string_field_no_heap_tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "rslsf_test_{}_{}_{}.toml",
+            "rslf_test_{}_{}_{}.toml",
             label,
             std::process::id(),
             nanos
@@ -1630,7 +1639,7 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// Basic case: a quoted value is copied without its quotes.
     #[test]
-    fn rslsf_scan_copies_quoted_value() {
+    fn rslf_scan_copies_quoted_value() {
         assert_eq!(
             copy_first_value("name = \"alice\"\n", "name", 16).unwrap(),
             b"alice"
@@ -1639,7 +1648,7 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// Unquoted values (numbers, bare words) end at the newline.
     #[test]
-    fn rslsf_scan_copies_unquoted_value() {
+    fn rslf_scan_copies_unquoted_value() {
         assert_eq!(
             copy_first_value("port = 8080\n", "port", 16).unwrap(),
             b"8080"
@@ -1648,14 +1657,14 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// CRLF files: the quoted value is unaffected by the CR.
     #[test]
-    fn rslsf_scan_handles_crlf_for_quoted_value() {
+    fn rslf_scan_handles_crlf_for_quoted_value() {
         let value = copy_first_value("name = \"bob\"\r\nother = \"x\"\r\n", "name", 16).unwrap();
         assert_eq!(value, b"bob");
     }
 
     /// CRLF files: the CR before LF is not part of an unquoted value.
     #[test]
-    fn rslsf_scan_handles_crlf_for_unquoted_value() {
+    fn rslf_scan_handles_crlf_for_unquoted_value() {
         assert_eq!(
             copy_first_value("port = 8080\r\nx = 1\r\n", "port", 16).unwrap(),
             b"8080"
@@ -1664,37 +1673,37 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// Comment lines (also indented) and blank lines are skipped.
     #[test]
-    fn rslsf_scan_skips_comments_and_blank_lines() {
+    fn rslf_scan_skips_comments_and_blank_lines() {
         let toml_text = "# header\n\n   # indented comment\nname = \"carol\"\n";
         assert_eq!(copy_first_value(toml_text, "name", 16).unwrap(), b"carol");
     }
 
     /// A longer key that starts with the requested key is not a match.
     #[test]
-    fn rslsf_scan_does_not_match_longer_key_with_same_prefix() {
+    fn rslf_scan_does_not_match_longer_key_with_same_prefix() {
         let toml_text = "name_long = \"WRONG\"\nname = \"RIGHT\"\n";
         assert_eq!(copy_first_value(toml_text, "name", 16).unwrap(), b"RIGHT");
     }
 
     /// A key that no line assigns is reported, not defaulted.
     #[test]
-    fn rslsf_scan_missing_key_with_code_811() {
+    fn rslf_scan_missing_key_with_code_811() {
         let error = copy_first_value("other = \"x\"\n", "name", 16).unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfFieldNotFound);
+        assert_eq!(error, HeatmapError::RSLFFieldNotFound);
         assert_eq!(error.code(), 811);
     }
 
     /// A value longer than the buffer (9 bytes into 8) is refused, never truncated.
     #[test]
-    fn rslsf_scan_value_longer_than_buffer_with_code_812() {
+    fn rslf_scan_value_longer_than_buffer_with_code_812() {
         let error = copy_first_value("name = \"toolongxx\"\n", "name", 8).unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfValueExceedsOutputBuffer);
+        assert_eq!(error, HeatmapError::RSLFValueExceedsOutputBuffer);
         assert_eq!(error.code(), 812);
     }
 
     /// A quoted value needs no trailing newline: the closing quote ends it.
     #[test]
-    fn rslsf_scan_quoted_value_at_end_of_file_is_complete() {
+    fn rslf_scan_quoted_value_at_end_of_file_is_complete() {
         assert_eq!(
             copy_first_value("name = \"dora\"", "name", 16).unwrap(),
             b"dora"
@@ -1704,23 +1713,23 @@ mod read_toml_single_line_string_field_no_heap_tests {
     /// An unquoted value without a trailing newline is incomplete (policy:
     /// unquoted values need `\n`, as quoted values need `"`).
     #[test]
-    fn rslsf_scan_unquoted_value_without_newline_with_code_813() {
+    fn rslf_scan_unquoted_value_without_newline_with_code_813() {
         let error = copy_first_value("port = 8080", "port", 16).unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfValueUnterminatedAtEndOfFile);
+        assert_eq!(error, HeatmapError::RSLFValueUnterminatedAtEndOfFile);
         assert_eq!(error.code(), 813);
     }
 
     /// A quoted value without a closing quote reads through the newline to
     /// end of file and is reported as incomplete.
     #[test]
-    fn rslsf_scan_quoted_value_without_closing_quote_with_code_813() {
+    fn rslf_scan_quoted_value_without_closing_quote_with_code_813() {
         let error = copy_first_value("name = \"alice\n", "name", 16).unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfValueUnterminatedAtEndOfFile);
+        assert_eq!(error, HeatmapError::RSLFValueUnterminatedAtEndOfFile);
     }
 
     /// The key is found after many unrelated lines.
     #[test]
-    fn rslsf_scan_finds_key_after_many_lines() {
+    fn rslf_scan_finds_key_after_many_lines() {
         let mut toml_text = String::new();
         for line_index in 0..200 {
             toml_text.push_str(&format!("noise_key_{:03} = \"junkjunkjunk\"\n", line_index));
@@ -1732,14 +1741,14 @@ mod read_toml_single_line_string_field_no_heap_tests {
     /// An unrelated line far longer than the output buffer does not stop the
     /// scan: only the matched value is stored.
     #[test]
-    fn rslsf_scan_unrelated_long_line_does_not_stop_scan() {
+    fn rslf_scan_unrelated_long_line_does_not_stop_scan() {
         let toml_text = format!("other_key = \"{}\"\nname = \"frank\"\n", "X".repeat(4096));
         assert_eq!(copy_first_value(&toml_text, "name", 16).unwrap(), b"frank");
     }
 
     /// Spaces and tabs are allowed before the key and around `=`.
     #[test]
-    fn rslsf_scan_allows_whitespace_around_key_and_equals() {
+    fn rslf_scan_allows_whitespace_around_key_and_equals() {
         let value = copy_first_value("   name\t=\t  \"grace\"   \n", "name", 16).unwrap();
         assert_eq!(value, b"grace");
     }
@@ -1747,14 +1756,14 @@ mod read_toml_single_line_string_field_no_heap_tests {
     /// The read returns the first assignment (duplicates are the optional
     /// uniqueness check's job).
     #[test]
-    fn rslsf_scan_first_assignment_wins() {
+    fn rslf_scan_first_assignment_wins() {
         let value = copy_first_value("name = \"first\"\nname = \"second\"\n", "name", 16).unwrap();
         assert_eq!(value, b"first");
     }
 
     /// Policy: spaces before the newline are part of an unquoted value.
     #[test]
-    fn rslsf_scan_unquoted_value_keeps_trailing_whitespace() {
+    fn rslf_scan_unquoted_value_keeps_trailing_whitespace() {
         assert_eq!(
             copy_first_value("port = 8080   \n", "port", 16).unwrap(),
             b"8080   "
@@ -1763,7 +1772,7 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// `key =` then newline is an empty value, not an error.
     #[test]
-    fn rslsf_scan_empty_unquoted_value_is_empty() {
+    fn rslf_scan_empty_unquoted_value_is_empty() {
         assert!(
             copy_first_value("name = \n", "name", 16)
                 .unwrap()
@@ -1773,7 +1782,7 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// `key = ""` is an empty value.
     #[test]
-    fn rslsf_scan_empty_quoted_value_is_empty() {
+    fn rslf_scan_empty_quoted_value_is_empty() {
         assert!(
             copy_first_value("name = \"\"\n", "name", 16)
                 .unwrap()
@@ -1783,13 +1792,13 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// A one-byte key completes on its first byte (general match path).
     #[test]
-    fn rslsf_scan_single_byte_key() {
+    fn rslf_scan_single_byte_key() {
         assert_eq!(copy_first_value("x = \"yes\"\n", "x", 16).unwrap(), b"yes");
     }
 
     /// Interrupted reads are retried, and the result is unchanged.
     #[test]
-    fn rslsf_scan_retries_interrupted_reads() {
+    fn rslf_scan_retries_interrupted_reads() {
         let mut toml_reader = InterruptEveryOtherRead {
             inner: Cursor::new(b"name = \"ivy\"\n".to_vec()),
             interrupt_next: true,
@@ -1808,7 +1817,7 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// Endless interruptions end at the read-call bound instead of looping forever.
     #[test]
-    fn rslsf_scan_endless_interruptions_with_code_809() {
+    fn rslf_scan_endless_interruptions_with_code_809() {
         let mut output_buffer = [0u8; 16];
         let error = scan_toml_reader_for_key(
             &mut AlwaysInterruptedReader,
@@ -1817,13 +1826,13 @@ mod read_toml_single_line_string_field_no_heap_tests {
             &mut output_buffer,
         )
         .unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfReadCallLimitReached);
+        assert_eq!(error, HeatmapError::RSLFReadCallLimitReached);
         assert_eq!(error.code(), 809);
     }
 
     /// A failing read stops the scan with its own code.
     #[test]
-    fn rslsf_scan_read_failure_with_code_808() {
+    fn rslf_scan_read_failure_with_code_808() {
         let mut output_buffer = [0u8; 16];
         let error = scan_toml_reader_for_key(
             &mut AlwaysFailingReader,
@@ -1832,13 +1841,13 @@ mod read_toml_single_line_string_field_no_heap_tests {
             &mut output_buffer,
         )
         .unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfReadFailed);
+        assert_eq!(error, HeatmapError::RSLFReadFailed);
         assert_eq!(error.code(), 808);
     }
 
     /// Input larger than the scan limit (here: endless) stops at the byte cap.
     #[test]
-    fn rslsf_scan_input_exceeds_limit_with_code_810() {
+    fn rslf_scan_input_exceeds_limit_with_code_810() {
         let mut endless_input = std::io::repeat(b'x');
         let mut output_buffer = [0u8; 16];
         let error = scan_toml_reader_for_key(
@@ -1848,14 +1857,14 @@ mod read_toml_single_line_string_field_no_heap_tests {
             &mut output_buffer,
         )
         .unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfFileExceedsScanLimit);
+        assert_eq!(error, HeatmapError::RSLFFileExceedsScanLimit);
         assert_eq!(error.code(), 810);
     }
 
     /// Key-line counting: assignments are counted; comments, longer keys,
     /// and lines without `=` are not; indented assignments are.
     #[test]
-    fn rslsf_count_counts_only_assignment_lines() {
+    fn rslf_count_counts_only_assignment_lines() {
         let toml_text = "name = \"a\"\n# name = \"b\"\nname_long = \"c\"\nname\n  name=\"d\"\n";
         assert_eq!(count_key_lines(toml_text, "name").unwrap(), 2);
         assert_eq!(count_key_lines(toml_text, "absent").unwrap(), 0);
@@ -1864,7 +1873,7 @@ mod read_toml_single_line_string_field_no_heap_tests {
     /// Invariant catch: a key-match position outside the key (state built
     /// directly, simulating corruption) is rejected, not indexed.
     #[test]
-    fn rslsf_scan_corrupt_match_position_with_code_814() {
+    fn rslf_scan_corrupt_match_position_with_code_814() {
         let mut no_value_buffer: [u8; 0] = [];
         let mut scan = ScanContext {
             key_bytes: b"name",
@@ -1878,31 +1887,31 @@ mod read_toml_single_line_string_field_no_heap_tests {
             key_line_count: 0,
         };
         let error = apply_byte_to_scan(&mut scan, b'a').unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfKeyMatchIndexInvalid);
+        assert_eq!(error, HeatmapError::RSLFKeyMatchIndexInvalid);
         assert_eq!(error.code(), 814);
     }
 
     /// Invariant catch: each goal's extractor rejects the other goal's result.
     #[test]
-    fn rslsf_scan_outcome_mismatch_with_code_815() {
+    fn rslf_scan_outcome_mismatch_with_code_815() {
         let error =
             copied_value_length_from_outcome(ScanOutcome::KeyLinesCounted { key_line_count: 1 })
                 .unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfScanOutcomeMismatch);
+        assert_eq!(error, HeatmapError::RSLFScanOutcomeMismatch);
         assert_eq!(error.code(), 815);
         assert_eq!(
             key_line_count_from_outcome(ScanOutcome::ValueCopied { written_length: 0 })
                 .unwrap_err(),
-            HeatmapError::RsLsfScanOutcomeMismatch
+            HeatmapError::RSLFScanOutcomeMismatch
         );
     }
 
     /// End to end on a real file: value read; later buffer bytes are 0.
     #[test]
-    fn rslsf_read_reads_value_from_file() {
+    fn rslf_read_reads_value_from_file() {
         let path = write_unique_temp_toml("read_ok", "mode = \"production\"\nport = 8080\n");
         let (output_buffer, written_length) =
-            read_single_line_string_field_from_toml_no_heap::<16>(&path, "mode").unwrap();
+            read_single_line_field_from_toml_no_heap::<16>(&path, "mode").unwrap();
         assert_eq!(&output_buffer[..written_length], b"production");
         assert!(
             output_buffer[written_length..]
@@ -1914,61 +1923,61 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// A relative path is refused before any file access.
     #[test]
-    fn rslsf_read_relative_path_with_code_803() {
-        let error = read_single_line_string_field_from_toml_no_heap::<16>(
+    fn rslf_read_relative_path_with_code_803() {
+        let error = read_single_line_field_from_toml_no_heap::<16>(
             Path::new("relative/config.toml"),
             "name",
         )
         .unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfPathNotAbsolute);
+        assert_eq!(error, HeatmapError::RSLFPathNotAbsolute);
         assert_eq!(error.code(), 803);
     }
 
     /// A missing file fails fast (not retryable, no backoff sleeps).
     #[test]
-    fn rslsf_read_missing_file_with_code_804() {
-        let error = read_single_line_string_field_from_toml_no_heap::<16>(
-            Path::new("/nonexistent_rslsf_test_dir/missing.toml"),
+    fn rslf_read_missing_file_with_code_804() {
+        let error = read_single_line_field_from_toml_no_heap::<16>(
+            Path::new("/nonexistent_rslf_test_dir/missing.toml"),
             "name",
         )
         .unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfOpenNotFound);
+        assert_eq!(error, HeatmapError::RSLFOpenNotFound);
         assert_eq!(error.code(), 804);
         assert!(!error.is_retryable());
     }
 
     /// An empty key is refused before the path is checked or opened.
     #[test]
-    fn rslsf_read_empty_key_with_code_801() {
-        let error = read_single_line_string_field_from_toml_no_heap::<16>(
-            Path::new("/nonexistent_rslsf_test_dir/any.toml"),
+    fn rslf_read_empty_key_with_code_801() {
+        let error = read_single_line_field_from_toml_no_heap::<16>(
+            Path::new("/nonexistent_rslf_test_dir/any.toml"),
             "",
         )
         .unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfEmptyKey);
+        assert_eq!(error, HeatmapError::RSLFEmptyKey);
         assert_eq!(error.code(), 801);
     }
 
     /// A zero-size output buffer is refused before any file access.
     #[test]
-    fn rslsf_read_zero_size_buffer_with_code_802() {
-        let error = read_single_line_string_field_from_toml_no_heap::<0>(
-            Path::new("/nonexistent_rslsf_test_dir/any.toml"),
+    fn rslf_read_zero_size_buffer_with_code_802() {
+        let error = read_single_line_field_from_toml_no_heap::<0>(
+            Path::new("/nonexistent_rslf_test_dir/any.toml"),
             "name",
         )
         .unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfOutputBufferZeroSized);
+        assert_eq!(error, HeatmapError::RSLFOutputBufferZeroSized);
         assert_eq!(error.code(), 802);
     }
 
     /// Uniqueness check on a real file: unique keys pass, a key assigned
     /// twice returns 816, and the per-key count shows which key.
     #[test]
-    fn rslsf_unique_duplicate_key_with_code_816() {
+    fn rslf_unique_duplicate_key_with_code_816() {
         let path = write_unique_temp_toml("unique", "mode = \"a\"\nport = 1\nmode = \"b\"\n");
         assert!(check_toml_keys_are_unique_no_heap(&path, &["port"]).is_ok());
         let error = check_toml_keys_are_unique_no_heap(&path, &["port", "mode"]).unwrap_err();
-        assert_eq!(error, HeatmapError::RsLsfDuplicateKey);
+        assert_eq!(error, HeatmapError::RSLFDuplicateKey);
         assert_eq!(error.code(), 816);
         assert_eq!(count_toml_key_lines_no_heap(&path, "mode").unwrap(), 2);
         std::fs::remove_file(&path).unwrap();
@@ -1976,16 +1985,16 @@ mod read_toml_single_line_string_field_no_heap_tests {
 
     /// Retry policy is per code: only the transient open code retries.
     #[test]
-    fn rslsf_err_is_retryable_only_transient_open() {
-        assert!(HeatmapError::RsLsfOpenTransient.is_retryable());
-        assert!(!HeatmapError::RsLsfOpenNotFound.is_retryable());
-        assert!(!HeatmapError::RsLsfReadCallLimitReached.is_retryable());
+    fn rslf_err_is_retryable_only_transient_open() {
+        assert!(HeatmapError::RSLFOpenTransient.is_retryable());
+        assert!(!HeatmapError::RSLFOpenNotFound.is_retryable());
+        assert!(!HeatmapError::RSLFReadCallLimitReached.is_retryable());
     }
 
     /// Single source of truth for code numbers: no message may contain the
     /// marker followed by a digit; numbers come only from `.code()`.
     #[test]
-    fn rslsf_guard_source_contains_no_hard_coded_error_code_numbers() {
+    fn rslf_guard_source_contains_no_hard_coded_error_code_numbers() {
         let source_files: [(&str, &str); 2] = [
             (
                 "hix_heatmap_indices_for_compute.rs",
@@ -1993,7 +2002,7 @@ mod read_toml_single_line_string_field_no_heap_tests {
             ),
             ("main.rs", include_str!("main.rs")),
         ];
-        let marker = "RSLSF-";
+        let marker = "RSLF-";
         for (file_name, source_text) in source_files.iter() {
             for (line_index, line_text) in source_text.lines().enumerate() {
                 for (found_index, _) in line_text.match_indices(marker) {
