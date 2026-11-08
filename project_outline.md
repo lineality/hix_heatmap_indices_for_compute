@@ -15,7 +15,7 @@ hix.exe
 
 - Holzmann: https://spinroot.com/gerard/pdf/P10.pdf 
 
-- HIX is focused on the Rust-language. It could be more abstractly (as another separate scope/project, or purely for comparison-planning-design discussion) for odin-lang, zig-lang, c, etc.
+- HIX is currently focused on the Rust-language. This is a broader topic and needs that can be (e.g. for comparison-planning-design discussion) expanded for odin-lang, zig-lang, c, cpp, etc.
 
 
 
@@ -145,13 +145,13 @@ e.g. ~ (maybe)
 total_site_time ≈ site_call_count × avg_time_per_call
 run_share  = total_site_time / total_time
 
-#### performance quadrant:
+#### Performance Quadrant: 
 - High count, high time/call
 - High count, low time/call
 - Low count, high time/call
 - Low count, low time/call
 
-4. (Optional/Theoretical) Tertiary Element-Hot: Specific Hot/Lag region analysis: what in/around/about a hot/lag function/loop is the issue? There may (or may not) be some cases where this is feasible; doubtless there are many cases where this is not feasible and unambiguous. 
+4. (Optional/Theoretical) Tertiary Element-Hot: Specific Hot/Lag region analysis: what in/around/about a hot/lag function/loop is the issue? There may (or may not) be some cases where this is feasible; doubtless there are many cases where this is not feasible and unambiguous. "Heat" vs. "Friction" (not to get bogged down in bad analogies): Heat is important raw data but does not directly indicate an issue. Are there any (probably very contextual) issue-identifications that can be either possibly pointed to or clearly defined?
 
 5. (Very Theoretical) Supplemental: Suggestions: Specific Hot/Lag region analysis: what in/around/about a hot/lag function/loop is the solution? (Interesting to think about but probably only very rarely clear.)
 
@@ -529,7 +529,7 @@ analysis_NNN_<purpose>
 
 # MVP-1 Scope:
 
-1. Use perf tools to look at functions and loops, not (yet, if ever) file-changes for bespoke regions within functions and loops.
+1. For a whole project: Use perf tools to look at functions and loops, not (yet, if ever) file-changes for bespoke regions within functions and loops.
 (Claude 5.5 is forever in a flame war with itself between using cargo/samply or perf... I cannot figure out why. cargo/samply maybe used later or in some other cases maybe)
 
 2. Use/Output a parameter-specified Top-N quadrant report, e.g. overall data about each quadrant, and top-N examples of path-to-fn/loop in 3/4 quadrants.
@@ -543,6 +543,12 @@ run (sharing, etc) or make a hix_{}.toml file (or whatever format).
 
 There is a module that can be used/adapted for clean toml reading.
 
+About Perf & Permissions:
+- 1. Don't run perf using sudo
+- 2. Don't run wizard using sudo
+- 3. User manually configures "perf_event_paranoid" before running (along with the various installs and setup)
+- 3. wizard can report if perf_event_paranoid has not been set, e.g. "Do this first, then it can run."
+- 4. Wizard can detect full-sudo and halt: "Oh no, do not run this under sudo; instead, configure perf_event_paranoid and then after that run HIX not-using-sudo."
 
 
 5. Time/duration of test probably should be included...
@@ -554,8 +560,11 @@ There is a module that can be used/adapted for clean toml reading.
 8. Ideally any data-visualization in reports does not use any 3rd party libraries, simple ascii version is highly practical (and terminal friendly).
 
 
-# Not in MVP-1:
-1. super-nuanced async/atomic/concurrent/parallel analysis
+# MVP-N Scope (not MVP-1)
+1. ...
+2. (Maybe) Targeted Report: specific file, specific sub-module, specific function, specific loop, (maybe for a tree of functions (called by a parent function...)
+3. (Maybe) nuanced async/atomic/concurrent/parallel analysis
+
 
 
 # Far Out of Scope (currently):
@@ -565,3 +574,25 @@ There is a module that can be used/adapted for clean toml reading.
 4. a 'heavy AST', type-analysis, etc.
 5. extremely arcane/exotic use-cases
 6. per-line analysis is not anticipated (that might go along with only within specific regions within functions/loops, which is all future scope)
+7. Free ice cream and ponies for everybody, forever. (out of scope, currently)
+
+
+
+
+## "Threads": terms and phrases to work into docs, naming (just for fun):
+- game over
+- bug hunt
+- ripping
+- bishop
+- cut the power
+- mostly
+- snap judgments
+- "It's the only way to be sure."
+- "and you know the drill"
+- "only need to know one thing: where they are"
+- fifth wheel
+- "somebody's gonna have to go out there. Take a portable terminal, go out there and patch in manually."
+- "Not bad for a human."
+- "Fifty-seven years"
+- ~"platform becoming too unstable"
+- "an ant-hive"

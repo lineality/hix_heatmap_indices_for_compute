@@ -1,21 +1,22 @@
-//! # hix_heatmap_indices_for_compute.rs — POC-1.2: Primary Count-Heat (MVP 1.1)
+//! # hix_heatmap_indices_for_compute.rs: count-heat analysis
 //!
-//! ## Development phase & use-type
-//! - Phase: POC-1.2, part of MVP 1.1 ("Primary Count").
-//! - Use-type: local developer analysis tool, run on demand, one-shot CLI.
-//! - Priorities: transparent, deterministic, reproducible numbers;
-//!   analysis that scales with sanity (no AST, no type analysis);
-//!   std-only (no crates) so this single flat module is portable.
+//! ## Purpose
+//! HIX maps where a Rust program spends its executions, to find the "low
+//! staves" of the Liebig barrel: the few functions and loops that dominate
+//! the work. This module measures count-heat: exact execution counts per
+//! function and per loop, from one instrumented run of the target program.
 //!
-//! ## What this module does (project context)
-//! The project goal is to map where a Rust program spends its executions
-//! (count-heat), later its time (time-heat), and then combine them
-//! (meta-heat quadrant), to find the "low staves" of the Liebig barrel:
-//! the low-hanging fruit.
+//! ## Use-type and priorities
+//! - Local developer analysis tool, run on demand, one-shot CLI.
+//! - Transparent, deterministic, reproducible numbers: every figure in the
+//!   report can be traced to its method in the `[provenance]` block.
+//! - Analysis that scales with sanity: no AST and no type analysis; files
+//!   whose every line count is 0 are skipped without being opened.
+//! - std only (no crates), so this single module is portable.
 //!
-//! POC-1.x does count-heat only:
-//! 1. Read an LCOV file produced by `cargo llvm-cov` from an instrumented
-//!    (`-C instrument-coverage`) run of the target program.
+//! ## Pipeline
+//! 1. Read an LCOV file produced by `cargo llvm-cov report --lcov` from a run
+//!    of the target program built with `-C instrument-coverage`.
 //! 2. FUNCTION sites: from `FN:`/`FNDA:` records. Function entry counts are
 //!    exact (LLVM counters, not samples). Monomorphized instances that share
 //!    one source line are summed into one site, and the number of merged
@@ -27,39 +28,74 @@
 //!    function definition line in that file.
 //! 4. Rank (hottest first, deterministic tie-break by file then line), then
 //!    summarize: totals, zero-count sites, concentration (how many sites carry
-//!    50% / 90% / 99% of counts), cold tail, order-of-magnitude histogram.
-//! 5. Write a text report (file + stdout) and a TSV with every site
-//!    (machine-readable input for POC-2, which will join time-heat on
-//!    `source_path:line`).
+//!    50% / 90% / 99% of counts), cold tail, order-of-magnitude histogram,
+//!    distribution shape, and co-count groups.
+//! 5. Write a text report (file + stdout) and a TSV with every site. Site
+//!    identity in the TSV is `source_path` + `line`, so other per-site data
+//!    (for example sampled time) can be joined onto it.
 //!
-//! ## Known limitations (documented features, not bugs, for POC-1)
+//! ## Output-directory safety
+//! HIX never overwrites earlier results. `--out-dir` must name a path that
+//! does not exist yet; its parent (e.g. the `run_NNN_<scenario>` folder) is
+//! created if missing.
+//! 1. Before any analysis: any existing entry at `--out-dir` (directory,
+//!    file, or symlink) stops the run with code 510. Nothing is read or
+//!    written, so a name collision costs no analysis time.
+//! 2. At write time the directory is created atomically (`create_dir`, which
+//!    fails if the path exists). If something else created it in the
+//!    meantime, the run stops with code 513 instead of mixing outputs.
+//! 3. Report files are opened create-new (never truncate): code 515 if one
+//!    exists.
+//! If a write fails after the directory was created, the partial directory is
+//! left in place (HIX never deletes); rerun with a new analysis name.
+//!
+//! ## Run metadata
+//! Optional flags describe the run that produced the LCOV, so reports from
+//! different runs can be compared fairly:
+//! - `--run-label` (e.g. `run_005_pumpkin_world_spawn_only`)
+//! - `--run-duration-secs` (how long the instrumented program ran)
+//! - `--work-units` + `--work-unit-name` (work done, e.g. `1200 chunks_generated`;
+//!   always given together)
+//! All are printed in `[provenance]` (`(not given)` when absent). With duration
+//! and work units both given, work units per minute is shown. With work units
+//! given, the TSV gains an appended column `count_per_work_unit`.
+//! Text values: 1..=max bytes of `A-Z a-z 0-9 _ - .` (safe in report, TSV, folder names).
+//!
+//! ## Known limitations
 //! - Loop detection is lexical: loops that do not start a line
 //!   (`let x = loop {`, `} else { for ...`) are missed; a line inside a
 //!   multi-line string that starts with `for ` may be a false positive (it
-//!   usually has no line count and is then reported as "no line data").
+//!   usually has no line count and is then reported as "no line count").
 //!   Block comments are tracked only when `/*` starts a line.
 //! - Iterator-adaptor loops (`.for_each(...)`, `.map(...)`) are not loop sites,
 //!   but their closures appear as function sites (LLVM instruments closures).
-//! - Stop condition is "D": whenever the instrumented program exited cleanly.
-//!   No in-tool duration or u32 cap in POC-1.
+//! - Loop attribution uses the nearest preceding function definition (there
+//!   are no function end-lines without an AST). A loop placed after a nested
+//!   fn or closure may be attributed to that inner fn; a counted loop whose
+//!   attributed fn has count 0 is flagged "attribution suspect".
+//! - Stop condition: counts cover the whole run, until the instrumented
+//!   program exited cleanly. There is no in-tool duration or count cap.
 //! - Function names may be mangled depending on tool versions; identity is
 //!   `source_path:line`, so counts are unaffected.
 //! - TSV fields are not escaped (paths containing tabs would break columns).
-//! - Over-long source lines (since POC-1.2): a source line longer than
-//!   `MAX_LINE_BYTES` (64 KiB) no longer causes the whole file to be skipped.
-//!   The first 64 KiB of the line are scanned exactly like a normal line (a
-//!   loop keyword or comment marker at the start of the line is still found).
-//!   The rest of the line is read and discarded; while discarding, the scanner
-//!   checks only for a block-comment end `*/`, so comment tracking stays
-//!   correct. The file is skipped only if the discarded remainder of one line
-//!   exceeds `MAX_SKIPPED_LINE_BYTES` (64 MiB). Over-long LCOV lines remain a
-//!   fatal error, because a real LCOV line is always short.
+//! - Over-long source lines: a source line longer than `MAX_LINE_BYTES`
+//!   (64 KiB) does not cause the file to be skipped. The first 64 KiB of the
+//!   line are scanned exactly like a normal line (a loop keyword or comment
+//!   marker at the start of the line is still found). The rest of the line is
+//!   read and discarded; while discarding, the scanner checks only for a
+//!   block-comment end `*/`, so comment tracking stays correct. The file is
+//!   skipped only if the discarded remainder of one line exceeds
+//!   `MAX_SKIPPED_LINE_BYTES` (64 MiB). Over-long LCOV lines are a fatal
+//!   error, because a real LCOV line is always short.
 //! - Block-comment tracking uses "does this line contain `*/`": a line that
 //!   closes one block comment and opens another (`*/ ... /*`) is treated as
 //!   closed. This applies to normal and over-long lines alike.
 //! - Nested block comments (`/* /* */ */`) are closed at the first `*/`.
 //!   Loop keywords in the rest of such a comment usually have no line count
 //!   and are then reported as "no line count".
+//! - Distribution-shape figures are descriptive (marked experimental in the
+//!   report): they summarize how counts are spread, for comparing runs; they
+//!   do not by themselves indicate a problem.
 //!
 //! ## Modes
 //! - Production-release: never panics; errors are 2-byte `HeatmapError` codes;
@@ -71,13 +107,118 @@
 //!
 //! ## Recovery tiers
 //! - Tier 1: transient file-open errors retried with bounded backoff.
-//! - Tier 2: a source file that cannot be scanned is skipped and counted
-//!   (reported in the provenance block); the analysis continues.
+//! - Tier 2: a source file that cannot be scanned is skipped, counted, and
+//!   listed in the report; the analysis continues.
 //! - Tier 3: top-level (`main`) logs the numeric code and exits non-zero.
 //!
 //! ## Heap policy
 //! Heap is used for analysis data (unavoidable for variable-size input),
 //! capped by the `MAX_*` constants. The error path never allocates.
+//!
+//!
+//! # Config File TOML Reading:
+//! ### From: read_toml_single_line_string_field_no_heap.rs
+//! Functionality: Read Single Line String Field = rslsf
+//!
+//! ## Error/Mode Policy:
+//! https://github.com/lineality/rust_lang_rules
+//! https://github.com/lineality/modes_and_case_handling
+//! https://github.com/lineality/modes_and_case_handling/blob/main/mode_case_handling_framework_summary.md
+//!
+//! Source: https://github.com/lineality/toml_read_field_noheap_rust
+//!
+//! ## Purpose
+//! Reads one short value for one top-level key from a small configuration
+//! file written in a TOML subset, without heap allocation. Optionally checks
+//! that given keys appear at most once in the file.
+//!
+//! ## Public functions
+//! - `read_single_line_string_field_from_toml_no_heap::<N>(path, key)`:
+//!   returns the value of the first line that assigns `key`, in an `N`-byte
+//!   stack array, plus the number of meaningful bytes.
+//! - `count_toml_key_lines_no_heap(path, key)`: number of lines that assign `key`.
+//! - `check_toml_keys_are_unique_no_heap(path, keys)`: error 816 if any key in
+//!   `keys` is assigned on more than one line.
+//!
+//! ## Why no heap, and why one byte at a time
+//! The usual idiom `BufReader::new(File).lines()` heap-allocates a ~8 KiB
+//! read buffer and one `String` per line, and hands owned `String`s to the
+//! caller. To read one short value, this module instead:
+//! - reads the file one byte per read call (no read-chunk buffer, no line buffer);
+//! - compares key bytes in place against the caller's key (the key is never copied);
+//! - writes only the matched value's bytes, directly into the caller's
+//!   fixed-size output array.
+//!
+//! Bounding the output to the size the task needs is also input sanitation:
+//! a value longer than the buffer cannot enter. It is refused with code 812,
+//! never silently truncated.
+//!
+//! Cost: one read call per byte, and one file open per call. For the intended
+//! use (a config file of a few dozen short lines, read a few times at startup)
+//! this is negligible.
+//!
+//! ## Accepted file format (TOML subset)
+//! - One `key = value` per line, top level only (no `[section]` support).
+//! - Leading spaces and tabs are allowed, and so are spaces and tabs around `=`.
+//! - Lines whose first non-whitespace byte is `#` are comments.
+//! - LF or CRLF line endings.
+//! - Values: double-quoted (`"..."`), or unquoted (numbers, bare words).
+//! - Keys are matched exactly, byte for byte (case-sensitive). A longer key
+//!   that starts with the requested key (`name_long` vs `name`) does not match.
+//!
+//! ## Value termination policy
+//! - Quoted values end at the next `"`. End of file before it: code 813.
+//! - Unquoted values end at the next `\n`; a `\r` directly before it is not
+//!   part of the value. End of file before `\n`: code 813. Spaces or tabs
+//!   before the `\n` ARE part of the value (the caller trims if wanted).
+//! - `key =` followed directly by `\n`: an empty value (length 0), not an error.
+//!
+//! ## Not supported (non-goals)
+//! - Full TOML: arrays, tables, inline tables, multi-line strings, escape
+//!   sequences (a `\` is copied as a plain byte), dotted keys, datetimes.
+//! - Trailing comments after an unquoted value: `port = 80 # x` yields the
+//!   value `80 # x`. After a quoted value they are ignored.
+//! - A UTF-8 byte-order mark at file start (the first key would not match).
+//! - Converting the value to text: the caller decides (e.g. `str::from_utf8`).
+//!
+//! A quoted value that contains a newline is read across the newline (it
+//! ends at `"`). Key-line counting does not know about such values, so a
+//! line inside one could be counted as a key line. Files written by a
+//! writer that refuses newlines in values never contain this case.
+//!
+//! ## Architecture
+//! `scan_toml_reader_for_key` drives a finite-state machine (`LineScanState`)
+//! one byte per read call, through `apply_byte_to_scan`. The scan has one of
+//! two goals (`ScanGoal`): copy the first matching value, or count key lines.
+//! The scanner works on any `Read`; the public functions give it an
+//! unbuffered `File`, and tests give it in-memory input.
+//!
+//! ## RSLSF Error codes
+//! Codes 801-816 are used; 817-849 are reserved for the matching config
+//! writer. Numbers range from 800-849 so that they may often be kept
+//! unchanged when this module is merged into a parent project in development.
+//! The table is in the `ReadTomlFieldError` doc comment.
+//!
+//! ## Modes
+//! - Production-release: never panics, never allocates; errors are 2-byte codes;
+//!   no printing.
+//! - Debug: gated `eprintln!` diagnostics (may print the path and key);
+//!   internal invariants (801, 802, 814, 815) also `debug_assert!`, gated
+//!   `#[cfg(all(debug_assertions, not(test)))]`.
+//! - Test: `#[cfg(test)]` unit tests using `assert!`/`unwrap`.
+//!
+//! ## Recovery tiers
+//! - Tier 1: transient open errors are retried with bounded backoff;
+//!   interrupted reads are retried within a bounded read-call allowance.
+//! - Tiers 2 and 3 belong to the caller (e.g. use a default, or stop with the code).
+//!
+//! ## Concurrency
+//! Synchronous, no shared state. Safe to call from several threads.
+//!
+//! #### Rust Policy, See:
+//! https://github.com/lineality/rust_lang_rules
+//! https://github.com/lineality/modes_and_case_handling
+//! https://github.com/lineality/modes_and_case_handling/blob/main/mode_case_handling_framework_summary.md
 
 #![forbid(unsafe_code)]
 
@@ -92,11 +233,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ============================================================================
 
 /// Maximum number of `--flag value` pairs accepted on the command line.
-/// Equals the number of distinct flags (`--lcov`, `--out-dir`, `--top-n`).
+/// Equals the number of distinct flags (`--lcov`, `--out-dir`, `--top-n`,
+/// `--run-label`, `--run-duration-secs`, `--work-units`, `--work-unit-name`)
+/// and the number of fields in `RawCliFlagValues`.
 /// Each flag may appear at most once, so any further argument is
 /// "too many arguments" (code 101). Raise this when a flag is added;
 /// the test `cli_parse_cli_arguments_extra_pair_with_code_101` fails if not.
-const MAX_CLI_FLAG_PAIRS: usize = 3;
+const MAX_CLI_FLAG_PAIRS: usize = 7;
+
+/// Longest accepted `--run-label` (bytes; ASCII only, so also characters).
+const MAX_RUN_LABEL_BYTES: usize = 128;
+
+/// Longest accepted `--work-unit-name` (bytes; ASCII only, so also characters).
+const MAX_WORK_UNIT_NAME_BYTES: usize = 64;
+
+/// Longest accepted `--run-duration-secs`: 365 days. Far above any real run;
+/// a larger value is almost certainly a typo (e.g. milliseconds given).
+const MAX_RUN_DURATION_SECS: u64 = 31_536_000;
+
+/// Largest accepted `--work-units` (10^15): a sanity bound, not a real limit.
+const MAX_WORK_UNITS: u64 = 1_000_000_000_000_000;
 
 /// Default number of rows in each Top-N table when `--top-n` is not given.
 const DEFAULT_TOP_N: u16 = 20;
@@ -108,7 +264,7 @@ const MAX_TOP_N: u16 = 10_000;
 ///
 /// - LCOV input: a longer line is a fatal error (`LcovLineTooLong`), because
 ///   every real LCOV record line is short; a longer one means corrupt input.
-/// - Source files (loop scan, since POC-1.2): a longer line is NOT an error.
+/// - Source files (loop scan): a longer line is NOT an error.
 ///   Its first `MAX_LINE_BYTES + 1` bytes are kept and scanned normally (loop
 ///   keywords and comment markers sit at the start of a line), and the rest
 ///   of the line is read and discarded. See `read_source_line_skipping_overlong`.
@@ -158,6 +314,11 @@ const CONCENTRATION_TARGET_COUNT: usize = 3;
 /// ("the remaining sites carry <= 100 - P% of counts").
 const CONCENTRATION_TARGETS_PERCENT: [u128; CONCENTRATION_TARGET_COUNT] = [50, 90, 99];
 
+/// Distribution shape: "share of all counts carried by the hottest K sites",
+/// reported for these two K values (narrow and wide view of the head).
+const TOP_SHARE_NARROW_SITES: usize = 1;
+const TOP_SHARE_WIDE_SITES: usize = 10;
+
 /// Order-of-magnitude histogram buckets: bucket 0 = count 0,
 /// bucket d (1..=20) = count in [10^(d-1), 10^d). u64::MAX has 20 digits.
 const DECADE_BUCKET_COUNT: usize = 21;
@@ -177,10 +338,18 @@ const ERROR_LOG_FILE_NAME: &str = "hix_error_log.txt";
 /// Usage text shown by `main` for command-line errors (static: no heap).
 pub const USAGE_TEXT: &str = "\
 usage: hix --lcov /ABSOLUTE/path/file.lcov --out-dir /ABSOLUTE/output/dir [--top-n 1..10000]
+           [--run-label LABEL] [--run-duration-secs N] [--work-units N --work-unit-name NAME]
 
-  --lcov     LCOV file from: cargo llvm-cov report --lcov --output-path /ABSOLUTE/file.lcov
-  --out-dir  directory for hix_report.txt and hix_sites.tsv
-  --top-n    rows per Top-N table (default 20)
+  --lcov               LCOV file from: cargo llvm-cov report --lcov --output-path /ABSOLUTE/file.lcov
+  --out-dir            NEW directory for hix_report.txt and hix_sites.tsv; must not exist yet
+                       (HIX never overwrites; the parent directory is created if missing)
+                       e.g. /ABSOLUTE/modeling_data/run_005_<scenario>/analysis_001_<purpose>
+  --top-n              rows per Top-N table (default 20)
+  --run-label          optional; e.g. run_005_pumpkin_world_spawn_only
+  --run-duration-secs  optional; seconds the instrumented program ran (1..31536000)
+  --work-units         optional; work done in the run (1..1000000000000000); needs --work-unit-name
+  --work-unit-name     optional; e.g. chunks_generated; needs --work-units
+Labels and unit names: 1-128 characters (unit name: 1-64) from A-Z a-z 0-9 _ - .
 All paths must be absolute.";
 
 /// Minimum count for a site to take part in co-count groups. Identical counts
@@ -204,6 +373,8 @@ const CO_COUNT_MIN_COUNT: u64 = 100_000;
 /// | 400–499 | analysis / aggregation                          |
 /// | 500–599 | report output                                   |
 /// | 600–699 | error log                                       |
+/// | 700–799 |                                                 |
+/// | 800–849 | config files (read; 817–849 reserved for write) |
 // `Debug` (variant names as text) exists only in test and debug builds, so a
 // production-release binary contains no variant-name strings, and any stray
 // `{:?}` on a HeatmapError in production-release code fails to compile.
@@ -221,6 +392,14 @@ pub enum HeatmapError {
     CliTopNNotUtf8 = 106,
     CliTopNNotANumber = 107,
     CliDuplicateFlag = 108,
+    CliRunLabelNotUtf8 = 109,
+    CliRunDurationNotUtf8 = 110,
+    CliRunDurationNotANumber = 111,
+    CliWorkUnitsNotUtf8 = 112,
+    CliWorkUnitsNotANumber = 113,
+    CliWorkUnitNameNotUtf8 = 114,
+    CliWorkUnitsWithoutName = 115,
+    CliWorkUnitNameWithoutUnits = 116,
 
     // 150–199: enforced custom types
     TypeTopNOutOfRange = 150,
@@ -229,6 +408,14 @@ pub enum HeatmapError {
     TypeLineNumberCorrupted = 153,
     TypePathNotAbsolute = 154,
     TypePathCorrupted = 155,
+    TypeRunLabelInvalid = 156,
+    TypeRunLabelCorrupted = 157,
+    TypeRunDurationOutOfRange = 158,
+    TypeRunDurationCorrupted = 159,
+    TypeWorkUnitsOutOfRange = 160,
+    TypeWorkUnitsCorrupted = 161,
+    TypeWorkUnitNameInvalid = 162,
+    TypeWorkUnitNameCorrupted = 163,
 
     // 200–299: LCOV input
     LcovOpenNotFound = 201,
@@ -269,6 +456,10 @@ pub enum HeatmapError {
     AnaFunctionLineIndexOverflow = 405,
     AnaCoCountRunInvalid = 406,
     AnaLoopScanTotalsMismatch = 407,
+    AnaLoopScanFileNotesMismatch = 408,
+    AnaShapeInputNotSorted = 409,
+    AnaShapeSumOverflow = 410,
+    AnaShapeDropIndexInvalid = 411,
 
     // 500–599: report output
     RptCreateDirectoryFailed = 501,
@@ -280,6 +471,12 @@ pub enum HeatmapError {
     RptFileWriteFailed = 507,
     RptFlushFailed = 508,
     RptStdoutWriteFailed = 509,
+    RptOutputPathAlreadyExists = 510,
+    RptOutputPathCheckFailed = 511,
+    RptOutputPathHasNoParent = 512,
+    RptOutputDirectoryAppearedDuringRun = 513,
+    RptOutputParentCreateFailed = 514,
+    RptOpenAlreadyExists = 515,
 
     // 600–699: error log
     LogExecutablePathUnavailable = 601,
@@ -287,6 +484,29 @@ pub enum HeatmapError {
     LogOpenFailed = 603,
     LogWriteFailed = 604,
     LogClockBeforeEpoch = 605,
+
+    // 700–799: ...
+
+    // 800-849: TOML/Config file read/write
+    // 800-816: for toml/config writer reader
+    // 817-849: for the toml/config writer
+    // Functionality: Read Single Line String Field = rslsf
+    RsLsfEmptyKey = 801,
+    RsLsfOutputBufferZeroSized = 802,
+    RsLsfPathNotAbsolute = 803,
+    RsLsfOpenNotFound = 804,
+    RsLsfOpenPermissionDenied = 805,
+    RsLsfOpenTransient = 806,
+    RsLsfOpenOther = 807,
+    RsLsfReadFailed = 808,
+    RsLsfReadCallLimitReached = 809,
+    RsLsfFileExceedsScanLimit = 810,
+    RsLsfFieldNotFound = 811,
+    RsLsfValueExceedsOutputBuffer = 812,
+    RsLsfValueUnterminatedAtEndOfFile = 813,
+    RsLsfKeyMatchIndexInvalid = 814,
+    RsLsfScanOutcomeMismatch = 815,
+    RsLsfDuplicateKey = 816,
 }
 
 impl HeatmapError {
@@ -299,13 +519,22 @@ impl HeatmapError {
     /// Defined per code (exhaustive, no wildcard) so new codes force a decision.
     pub fn is_retryable(self) -> bool {
         match self {
-            HeatmapError::LcovOpenTransient
+            HeatmapError::RsLsfOpenTransient
+            | HeatmapError::LcovOpenTransient
             | HeatmapError::SrcOpenTransient
             | HeatmapError::RptOpenTransient => true,
 
-            HeatmapError::AnaFunctionLineIndexOverflow
-            | HeatmapError::AnaCoCountRunInvalid
+            HeatmapError::AnaCoCountRunInvalid
+            | HeatmapError::AnaShapeInputNotSorted
+            | HeatmapError::AnaShapeSumOverflow
+            | HeatmapError::AnaShapeDropIndexInvalid
+            | HeatmapError::AnaCountOverflow
+            | HeatmapError::AnaLoopScanFileNotesMismatch
             | HeatmapError::AnaLoopScanTotalsMismatch
+            | HeatmapError::AnaFileIndexInvalid
+            | HeatmapError::AnaFunctionLineIndexOverflow
+            | HeatmapError::AnaHistogramIndexInvalid
+            | HeatmapError::AnaSiteIndexInvalid
             | HeatmapError::CliTooManyArguments
             | HeatmapError::CliUnknownFlag
             | HeatmapError::CliMissingFlagValue
@@ -314,12 +543,6 @@ impl HeatmapError {
             | HeatmapError::CliTopNNotUtf8
             | HeatmapError::CliTopNNotANumber
             | HeatmapError::CliDuplicateFlag
-            | HeatmapError::TypeTopNOutOfRange
-            | HeatmapError::TypeTopNCorrupted
-            | HeatmapError::TypeLineNumberZero
-            | HeatmapError::TypeLineNumberCorrupted
-            | HeatmapError::TypePathNotAbsolute
-            | HeatmapError::TypePathCorrupted
             | HeatmapError::LcovOpenNotFound
             | HeatmapError::LcovOpenPermissionDenied
             | HeatmapError::LcovOpenOther
@@ -336,6 +559,24 @@ impl HeatmapError {
             | HeatmapError::LcovNoData
             | HeatmapError::LcovCountOverflow
             | HeatmapError::LcovTooManyFiles
+            | HeatmapError::LogExecutablePathUnavailable
+            | HeatmapError::LogExecutableParentMissing
+            | HeatmapError::LogOpenFailed
+            | HeatmapError::LogWriteFailed
+            | HeatmapError::RptCreateDirectoryFailed
+            | HeatmapError::RptOpenNotFound
+            | HeatmapError::RptOpenPermissionDenied
+            | HeatmapError::RptOpenOther
+            | HeatmapError::RptBufferWriteFailed
+            | HeatmapError::RptFileWriteFailed
+            | HeatmapError::RptFlushFailed
+            | HeatmapError::RptStdoutWriteFailed
+            | HeatmapError::RptOutputPathAlreadyExists
+            | HeatmapError::RptOutputPathCheckFailed
+            | HeatmapError::RptOutputPathHasNoParent
+            | HeatmapError::RptOutputDirectoryAppearedDuringRun
+            | HeatmapError::RptOutputParentCreateFailed
+            | HeatmapError::RptOpenAlreadyExists
             | HeatmapError::SrcOpenNotFound
             | HeatmapError::SrcOpenPermissionDenied
             | HeatmapError::SrcOpenOther
@@ -345,23 +586,44 @@ impl HeatmapError {
             | HeatmapError::SrcLineExceedsSkipCap
             | HeatmapError::SrcSkipReadFailed
             | HeatmapError::SrcSkipReadCallLimit
-            | HeatmapError::AnaCountOverflow
-            | HeatmapError::AnaFileIndexInvalid
-            | HeatmapError::AnaSiteIndexInvalid
-            | HeatmapError::AnaHistogramIndexInvalid
-            | HeatmapError::RptCreateDirectoryFailed
-            | HeatmapError::RptOpenNotFound
-            | HeatmapError::RptOpenPermissionDenied
-            | HeatmapError::RptOpenOther
-            | HeatmapError::RptBufferWriteFailed
-            | HeatmapError::RptFileWriteFailed
-            | HeatmapError::RptFlushFailed
-            | HeatmapError::RptStdoutWriteFailed
-            | HeatmapError::LogExecutablePathUnavailable
-            | HeatmapError::LogExecutableParentMissing
-            | HeatmapError::LogOpenFailed
-            | HeatmapError::LogWriteFailed
-            | HeatmapError::LogClockBeforeEpoch => false,
+            | HeatmapError::TypeTopNOutOfRange
+            | HeatmapError::TypeTopNCorrupted
+            | HeatmapError::TypeLineNumberZero
+            | HeatmapError::TypeLineNumberCorrupted
+            | HeatmapError::TypePathNotAbsolute
+            | HeatmapError::TypePathCorrupted
+            | HeatmapError::CliRunLabelNotUtf8
+            | HeatmapError::CliRunDurationNotUtf8
+            | HeatmapError::CliRunDurationNotANumber
+            | HeatmapError::CliWorkUnitsNotUtf8
+            | HeatmapError::CliWorkUnitsNotANumber
+            | HeatmapError::CliWorkUnitNameNotUtf8
+            | HeatmapError::CliWorkUnitsWithoutName
+            | HeatmapError::CliWorkUnitNameWithoutUnits
+            | HeatmapError::TypeRunLabelInvalid
+            | HeatmapError::TypeRunLabelCorrupted
+            | HeatmapError::TypeRunDurationOutOfRange
+            | HeatmapError::TypeRunDurationCorrupted
+            | HeatmapError::TypeWorkUnitsOutOfRange
+            | HeatmapError::TypeWorkUnitsCorrupted
+            | HeatmapError::TypeWorkUnitNameInvalid
+            | HeatmapError::TypeWorkUnitNameCorrupted
+            | HeatmapError::LogClockBeforeEpoch
+            | HeatmapError::RsLsfEmptyKey
+            | HeatmapError::RsLsfOutputBufferZeroSized
+            | HeatmapError::RsLsfPathNotAbsolute
+            | HeatmapError::RsLsfOpenNotFound
+            | HeatmapError::RsLsfOpenPermissionDenied
+            | HeatmapError::RsLsfOpenOther
+            | HeatmapError::RsLsfReadFailed
+            | HeatmapError::RsLsfReadCallLimitReached
+            | HeatmapError::RsLsfFileExceedsScanLimit
+            | HeatmapError::RsLsfFieldNotFound
+            | HeatmapError::RsLsfValueExceedsOutputBuffer
+            | HeatmapError::RsLsfValueUnterminatedAtEndOfFile
+            | HeatmapError::RsLsfKeyMatchIndexInvalid
+            | HeatmapError::RsLsfScanOutcomeMismatch
+            | HeatmapError::RsLsfDuplicateKey => false,
         }
     }
 
@@ -378,8 +640,21 @@ impl HeatmapError {
                 | HeatmapError::CliTopNNotUtf8
                 | HeatmapError::CliTopNNotANumber
                 | HeatmapError::CliDuplicateFlag
+                | HeatmapError::RptOutputPathAlreadyExists
                 | HeatmapError::TypeTopNOutOfRange
                 | HeatmapError::TypePathNotAbsolute
+                | HeatmapError::CliRunLabelNotUtf8
+                | HeatmapError::CliRunDurationNotUtf8
+                | HeatmapError::CliRunDurationNotANumber
+                | HeatmapError::CliWorkUnitsNotUtf8
+                | HeatmapError::CliWorkUnitsNotANumber
+                | HeatmapError::CliWorkUnitNameNotUtf8
+                | HeatmapError::CliWorkUnitsWithoutName
+                | HeatmapError::CliWorkUnitNameWithoutUnits
+                | HeatmapError::TypeRunLabelInvalid
+                | HeatmapError::TypeRunDurationOutOfRange
+                | HeatmapError::TypeWorkUnitsOutOfRange
+                | HeatmapError::TypeWorkUnitNameInvalid
         )
     }
 }
@@ -389,6 +664,52 @@ impl HeatmapError {
 impl std::fmt::Display for HeatmapError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let description: &str = match self {
+            HeatmapError::AnaShapeInputNotSorted => {
+                "distribution-shape input is not sorted hottest-first"
+            }
+            HeatmapError::AnaShapeSumOverflow => "distribution-shape weighted sum overflowed u128",
+            HeatmapError::AnaShapeDropIndexInvalid => "distribution-shape drop site index invalid",
+            HeatmapError::CliRunLabelNotUtf8 => "--run-label value is not UTF-8",
+            HeatmapError::CliRunDurationNotUtf8 => "--run-duration-secs value is not UTF-8",
+            HeatmapError::CliRunDurationNotANumber => {
+                "--run-duration-secs value is not a u64 number"
+            }
+            HeatmapError::CliWorkUnitsNotUtf8 => "--work-units value is not UTF-8",
+            HeatmapError::CliWorkUnitsNotANumber => "--work-units value is not a u64 number",
+            HeatmapError::CliWorkUnitNameNotUtf8 => "--work-unit-name value is not UTF-8",
+            HeatmapError::CliWorkUnitsWithoutName => "--work-units requires --work-unit-name",
+            HeatmapError::CliWorkUnitNameWithoutUnits => "--work-unit-name requires --work-units",
+            HeatmapError::TypeRunLabelInvalid => {
+                "run label must be 1..=MAX_RUN_LABEL_BYTES of A-Z a-z 0-9 _ - ."
+            }
+            HeatmapError::TypeRunLabelCorrupted => "RunLabel failed validity recheck",
+            HeatmapError::TypeRunDurationOutOfRange => {
+                "run duration outside 1..=MAX_RUN_DURATION_SECS"
+            }
+            HeatmapError::TypeRunDurationCorrupted => "RunDurationSeconds failed validity recheck",
+            HeatmapError::TypeWorkUnitsOutOfRange => "work units outside 1..=MAX_WORK_UNITS",
+            HeatmapError::TypeWorkUnitsCorrupted => "WorkUnitCount failed validity recheck",
+            HeatmapError::TypeWorkUnitNameInvalid => {
+                "work unit name must be 1..=MAX_WORK_UNIT_NAME_BYTES of A-Z a-z 0-9 _ - ."
+            }
+            HeatmapError::TypeWorkUnitNameCorrupted => "WorkUnitName failed validity recheck",
+            HeatmapError::AnaLoopScanFileNotesMismatch => {
+                "loop-scan file notes do not match the skip / over-long counters"
+            }
+            HeatmapError::RptOutputPathAlreadyExists => {
+                "--out-dir already exists; choose a new analysis name (nothing was read or written)"
+            }
+            HeatmapError::RptOutputPathCheckFailed => "could not check whether --out-dir exists",
+            HeatmapError::RptOutputPathHasNoParent => "--out-dir has no parent directory",
+            HeatmapError::RptOutputDirectoryAppearedDuringRun => {
+                "--out-dir was created by something else during this run; nothing written"
+            }
+            HeatmapError::RptOutputParentCreateFailed => {
+                "could not create the parent directory of --out-dir"
+            }
+            HeatmapError::RptOpenAlreadyExists => {
+                "report file already exists; refusing to overwrite"
+            }
             HeatmapError::AnaFunctionLineIndexOverflow => {
                 "function-line index count sum overflowed"
             }
@@ -465,8 +786,1228 @@ impl std::fmt::Display for HeatmapError {
             HeatmapError::LogOpenFailed => "error log open failed",
             HeatmapError::LogWriteFailed => "error log write failed",
             HeatmapError::LogClockBeforeEpoch => "system clock is before UNIX epoch",
+            HeatmapError::RsLsfEmptyKey => "key is empty",
+            HeatmapError::RsLsfOutputBufferZeroSized => "OUTPUT_BUFFER_BYTES is 0",
+            HeatmapError::RsLsfPathNotAbsolute => "toml path is not absolute",
+            HeatmapError::RsLsfOpenNotFound => "toml file not found",
+            HeatmapError::RsLsfOpenPermissionDenied => "toml file permission denied",
+            HeatmapError::RsLsfOpenTransient => {
+                "toml file open: transient error (retries exhausted)"
+            }
+            HeatmapError::RsLsfOpenOther => "toml file open failed",
+            HeatmapError::RsLsfReadFailed => "toml file read failed",
+            HeatmapError::RsLsfReadCallLimitReached => {
+                "read-call allowance used up (reads kept being interrupted)"
+            }
+            HeatmapError::RsLsfFileExceedsScanLimit => "toml file exceeds RSLSF_MAX_BYTES_SCANNED",
+            HeatmapError::RsLsfFieldNotFound => "no line assigns the key",
+            HeatmapError::RsLsfValueExceedsOutputBuffer => {
+                "value longer than the output buffer; refusing to truncate"
+            }
+            HeatmapError::RsLsfValueUnterminatedAtEndOfFile => {
+                "end of file inside a value (no closing quote or no newline)"
+            }
+            HeatmapError::RsLsfKeyMatchIndexInvalid => {
+                "key-match position outside the key (internal invariant)"
+            }
+            HeatmapError::RsLsfScanOutcomeMismatch => {
+                "scan returned the other goal's result (internal invariant)"
+            }
+            HeatmapError::RsLsfDuplicateKey => "a checked key is assigned on more than one line",
         };
         write!(formatter, "HIX-{}: {}", self.code(), description)
+    }
+}
+
+// ============================================================================
+// TOML - Config File Reading
+// ============================================================================
+// ============================================================================
+// Constants (every loop is bounded by these)
+// ============================================================================
+
+/// Largest file this module will scan, in bytes (1 MiB).
+///
+/// Far above any config file in scope. A larger file stops the scan with
+/// code 810 instead of running unbounded work on unexpected input.
+pub const RSLSF_MAX_BYTES_SCANNED: u64 = 1 << 20;
+
+/// Extra read calls allowed for "interrupted" reads (the OS asks the
+/// program to try again; nothing is read).
+///
+/// Every other read call either reads one byte or reports end of file, so
+/// the byte limit already bounds those. This allowance keeps the scan loop
+/// finite even if a reader reports "interrupted" forever (code 809).
+const RSLSF_EXTRA_READ_CALLS: u64 = 1024;
+
+/// Tier-1 retry: maximum attempts to open the file on transient errors.
+const RSLSF_MAX_OPEN_ATTEMPTS: u32 = 3;
+
+/// Tier-1 retry: backoff step in milliseconds (retry n sleeps n * step).
+const RSLSF_OPEN_RETRY_BACKOFF_STEP_MS: u64 = 50;
+
+// ============================================================================
+// Scanner types
+// ============================================================================
+
+/// State of the byte-at-a-time line scanner. One state per position class
+/// on a line; the current state plus the next byte decides the next state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineScanState {
+    /// At the start of the file or just after `\n`.
+    AtLineStart,
+    /// Inside leading spaces/tabs; same transitions as `AtLineStart`.
+    SkippingLeadingWhitespace,
+    /// The first `matched_key_bytes` bytes of the key have matched.
+    MatchingKey { matched_key_bytes: usize },
+    /// The whole key matched; expecting optional spaces/tabs, then `=`.
+    AwaitingEquals,
+    /// Copy goal only: saw `=`; skipping spaces/tabs before the value.
+    AwaitingValueStart,
+    /// Copy goal only: inside an unquoted value; ends at `\n`.
+    CopyingUnquotedValue,
+    /// Copy goal only: inside a quoted value; ends at `"`.
+    CopyingQuotedValue,
+    /// This line cannot (or no longer needs to) match; skip to `\n`.
+    SkippingToEndOfLine,
+    /// Comment line (`#` first); skip to `\n`.
+    InCommentToEndOfLine,
+}
+
+/// What one scan is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanGoal {
+    /// Copy the value of the first line that assigns the key, then stop.
+    CopyFirstValue,
+    /// Count every line that assigns the key; read to the end of the file.
+    CountKeyLines,
+}
+
+/// Result of a completed scan; the variant matches the `ScanGoal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanOutcome {
+    /// Copy goal: the first `written_length` bytes of the output buffer hold the value.
+    ValueCopied { written_length: usize },
+    /// Count goal: number of lines that assign the key.
+    KeyLinesCounted { key_line_count: u32 },
+}
+
+/// Everything one scan carries from byte to byte. Fixed size; no heap.
+#[derive(Debug)]
+struct ScanContext<'key, 'buffer> {
+    /// The key, compared in place (never copied).
+    key_bytes: &'key [u8],
+    scan_goal: ScanGoal,
+    /// Caller's output buffer (empty for the count goal).
+    output_buffer: &'buffer mut [u8],
+    state: LineScanState,
+    /// Next write position in `output_buffer` (= value bytes written so far).
+    write_cursor: usize,
+    /// Unquoted values: a `\r` was seen and is held until the next byte
+    /// shows whether it is part of a CRLF ending (dropped) or of the value
+    /// (written). Avoids needing a look-ahead buffer.
+    unquoted_value_has_pending_cr: bool,
+    /// Count goal: lines that assign the key so far. Cannot reach
+    /// `u32::MAX`: the file is capped at `RSLSF_MAX_BYTES_SCANNED` bytes.
+    key_line_count: u32,
+}
+
+impl ScanContext<'_, '_> {
+    /// Writes one value byte at `write_cursor` and advances it.
+    ///
+    /// # Returns
+    /// - `Ok(())`.
+    /// - `Err(RsLsfValueExceedsOutputBuffer)` (input validation): the value is
+    ///   longer than the output buffer. Nothing is truncated; the caller gets
+    ///   no partial value.
+    fn push_value_byte(&mut self, value_byte: u8) -> Result<(), HeatmapError> {
+        match self.output_buffer.get_mut(self.write_cursor) {
+            Some(buffer_slot) => *buffer_slot = value_byte,
+            None => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: value longer than output buffer of {} bytes",
+                    HeatmapError::RsLsfValueExceedsOutputBuffer.code(),
+                    self.output_buffer.len()
+                );
+                return Err(HeatmapError::RsLsfValueExceedsOutputBuffer);
+            }
+        }
+        // Cannot overflow: write_cursor < output_buffer.len() was just confirmed.
+        self.write_cursor = self.write_cursor.saturating_add(1);
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Public functions
+// ============================================================================
+
+/// Reads the value of the first line that assigns `target_field_key`,
+/// using only stack memory.
+///
+/// # Project context
+/// For reading short config values (paths, names, numbers) at startup with
+/// no heap use. The file is read one byte per read call, and only the
+/// matched value's bytes are stored. See the module doc for the accepted
+/// format and the value-termination policy.
+///
+/// # Type parameter
+/// - `OUTPUT_BUFFER_BYTES`: size of the returned array; the longest value
+///   accepted. Must be > 0. Choose the smallest size that fits the field
+///   (e.g. 4096 for a Linux path). Longer values return 812, never a
+///   truncated value.
+///
+/// # Arguments
+/// - `absolute_toml_file_path`: must be absolute.
+/// - `target_field_key`: exact top-level key; must not be empty.
+///
+/// # Returns
+/// - `Ok((buffer, written_length))`: `buffer[..written_length]` is the value;
+///   later bytes are 0.
+/// - `Err`: 801, 802 (internal invariants); 803-813 (see the error table); 815.
+///
+/// If the key may appear more than once and that must be an error, call
+/// `check_toml_keys_are_unique_no_heap` first; this function returns the first match.
+///
+/// # Modes
+/// Debug builds print diagnostics (may include path and key); 801 and 802
+/// also panic in debug builds (not test). Production-release returns codes only.
+pub fn read_single_line_string_field_from_toml_no_heap<const OUTPUT_BUFFER_BYTES: usize>(
+    absolute_toml_file_path: &Path,
+    target_field_key: &str,
+) -> Result<([u8; OUTPUT_BUFFER_BYTES], usize), HeatmapError> {
+    // --- Check: output buffer has room for at least one byte ---
+    // internal invariant: callers choose a constant size > 0.
+    if OUTPUT_BUFFER_BYTES == 0 {
+        #[cfg(all(debug_assertions, not(test)))]
+        debug_assert!(
+            false,
+            "HIX-{}: OUTPUT_BUFFER_BYTES is 0",
+            HeatmapError::RsLsfOutputBufferZeroSized.code()
+        );
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: OUTPUT_BUFFER_BYTES is 0",
+            HeatmapError::RsLsfOutputBufferZeroSized.code()
+        );
+        return Err(HeatmapError::RsLsfOutputBufferZeroSized);
+    }
+
+    let mut toml_file = open_toml_file_for_scan(absolute_toml_file_path, target_field_key)?;
+    let mut output_buffer: [u8; OUTPUT_BUFFER_BYTES] = [0u8; OUTPUT_BUFFER_BYTES];
+    let scan_outcome = scan_toml_reader_for_key(
+        &mut toml_file,
+        target_field_key.as_bytes(),
+        ScanGoal::CopyFirstValue,
+        &mut output_buffer,
+    )?;
+    let written_length = copied_value_length_from_outcome(scan_outcome)?;
+    Ok((output_buffer, written_length))
+}
+
+/// Counts the lines that assign `target_field_key`.
+///
+/// # Project context
+/// Basis of the optional duplicate-key check. A hand-edited config with a
+/// key written twice would otherwise silently use the first value.
+///
+/// A key line is a line whose first non-whitespace bytes are exactly the
+/// key, followed by optional spaces/tabs and `=`. Comment lines and longer
+/// keys starting with the same bytes are not counted. See the module doc for
+/// the multi-line quoted-value limitation.
+///
+/// # Returns
+/// - `Ok(count)`: 0 if the key is not assigned.
+/// - `Err`: 801, 803-810, 814, 815 (see the error table).
+pub fn count_toml_key_lines_no_heap(
+    absolute_toml_file_path: &Path,
+    target_field_key: &str,
+) -> Result<u32, HeatmapError> {
+    let mut toml_file = open_toml_file_for_scan(absolute_toml_file_path, target_field_key)?;
+    // The count goal never writes value bytes.
+    let mut no_value_buffer: [u8; 0] = [];
+    let scan_outcome = scan_toml_reader_for_key(
+        &mut toml_file,
+        target_field_key.as_bytes(),
+        ScanGoal::CountKeyLines,
+        &mut no_value_buffer,
+    )?;
+    key_line_count_from_outcome(scan_outcome)
+}
+
+/// Checks that each key in `target_field_keys` is assigned on at most one line.
+///
+/// # Project context
+/// Optional pre-check before reading fields, so that an ambiguous config
+/// (a key written twice) stops with a code instead of silently using the
+/// first value. Keys not in the list are not checked. A key that is missing
+/// is not an error here; the read function reports that (811).
+///
+/// Opens and scans the file once per key (bounded by the slice length).
+///
+/// # Returns
+/// - `Ok(())`: every listed key appears at most once.
+/// - `Err(RsLsfDuplicateKey)` (816, input validation): some key appears more
+///   than once. The code carries no key; a caller that needs to know which key
+///   can call `count_toml_key_lines_no_heap` per key. Debug builds print the key.
+/// - Any error from `count_toml_key_lines_no_heap`, unchanged.
+pub fn check_toml_keys_are_unique_no_heap(
+    absolute_toml_file_path: &Path,
+    target_field_keys: &[&str],
+) -> Result<(), HeatmapError> {
+    for target_field_key in target_field_keys.iter() {
+        let key_line_count =
+            count_toml_key_lines_no_heap(absolute_toml_file_path, target_field_key)?;
+        if key_line_count > 1 {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: key {:?} assigned on {} lines in {}",
+                HeatmapError::RsLsfDuplicateKey.code(),
+                target_field_key,
+                key_line_count,
+                absolute_toml_file_path.display()
+            );
+            return Err(HeatmapError::RsLsfDuplicateKey);
+        }
+    }
+    Ok(())
+}
+
+// ============================================================================
+// File opening
+// ============================================================================
+
+/// Shared preamble of the public functions: checks the key and path, then
+/// opens the file (Tier-1 retry).
+///
+/// # Returns
+/// - `Ok(File)`: unbuffered on purpose (one byte per read call; no heap buffer).
+/// - `Err(RsLsfEmptyKey)` (internal invariant: callers pass constant keys).
+/// - `Err(RsLsfPathNotAbsolute)` (input validation).
+/// - `Err(804 | 805 | 806 | 807)` from `open_toml_file_with_retry`.
+fn open_toml_file_for_scan(
+    absolute_toml_file_path: &Path,
+    target_field_key: &str,
+) -> Result<File, HeatmapError> {
+    // --- Check: key is not empty ---
+    // internal invariant: an empty key can never match and is a caller bug.
+    if target_field_key.is_empty() {
+        #[cfg(all(debug_assertions, not(test)))]
+        debug_assert!(
+            false,
+            "HIX-{}: empty key",
+            HeatmapError::RsLsfEmptyKey.code()
+        );
+        #[cfg(debug_assertions)]
+        eprintln!("HIX-{}: empty key", HeatmapError::RsLsfEmptyKey.code());
+        return Err(HeatmapError::RsLsfEmptyKey);
+    }
+
+    // --- Check: path is absolute ---
+    // input validation: the path comes from the caller's configuration.
+    if !absolute_toml_file_path.is_absolute() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: not absolute: {}",
+            HeatmapError::RsLsfPathNotAbsolute.code(),
+            absolute_toml_file_path.display()
+        );
+        return Err(HeatmapError::RsLsfPathNotAbsolute);
+    }
+
+    open_toml_file_with_retry(absolute_toml_file_path)
+}
+
+/// Maps an open-error kind to this module's codes. The `io::Error` itself
+/// (which may hold path text) is dropped by the caller; only the kind is used.
+/// Kinds not listed are "other" (807), which is non-retryable by policy.
+fn classify_toml_open_error(io_error_kind: std::io::ErrorKind) -> HeatmapError {
+    match io_error_kind {
+        std::io::ErrorKind::NotFound => HeatmapError::RsLsfOpenNotFound,
+        std::io::ErrorKind::PermissionDenied => HeatmapError::RsLsfOpenPermissionDenied,
+        std::io::ErrorKind::Interrupted
+        | std::io::ErrorKind::WouldBlock
+        | std::io::ErrorKind::TimedOut => HeatmapError::RsLsfOpenTransient,
+        // Required wildcard: io::ErrorKind is #[non_exhaustive].
+        _ => HeatmapError::RsLsfOpenOther,
+    }
+}
+
+/// Opens the file read-only, retrying transient failures (Tier 1).
+///
+/// Up to `RSLSF_MAX_OPEN_ATTEMPTS` attempts; retry n sleeps
+/// n * `RSLSF_OPEN_RETRY_BACKOFF_STEP_MS`. Non-retryable codes return at once.
+///
+/// # Returns
+/// - `Ok(File)`.
+/// - `Err(804 | 805 | 806 | 807)`.
+fn open_toml_file_with_retry(absolute_toml_file_path: &Path) -> Result<File, HeatmapError> {
+    for attempt_index in 0..RSLSF_MAX_OPEN_ATTEMPTS {
+        match File::open(absolute_toml_file_path) {
+            Ok(opened_file) => return Ok(opened_file),
+            Err(io_error) => {
+                let error_code = classify_toml_open_error(io_error.kind());
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: open attempt {} failed for {}: {}",
+                    error_code.code(),
+                    attempt_index,
+                    absolute_toml_file_path.display(),
+                    io_error
+                );
+                if !error_code.is_retryable() {
+                    return Err(error_code);
+                }
+                // Last attempt failed: the result is decided, so do not sleep.
+                let next_attempt_index = attempt_index.saturating_add(1);
+                if next_attempt_index >= RSLSF_MAX_OPEN_ATTEMPTS {
+                    return Err(error_code);
+                }
+                let backoff_milliseconds =
+                    RSLSF_OPEN_RETRY_BACKOFF_STEP_MS.saturating_mul(u64::from(next_attempt_index));
+                std::thread::sleep(Duration::from_millis(backoff_milliseconds));
+            }
+        }
+    }
+    // Reached only if RSLSF_MAX_OPEN_ATTEMPTS is 0 (no attempt was made).
+    Err(HeatmapError::RsLsfOpenTransient)
+}
+
+// ============================================================================
+// Scanner
+// ============================================================================
+
+/// Scans `toml_reader` one byte per read call for lines that assign the key.
+///
+/// # Steps (bounded loop)
+/// 1. Read one byte. "Interrupted": try again (uses the extra allowance).
+///    Any other read error: 808.
+/// 2. End of input: finish according to goal and state
+///    (`finish_scan_at_end_of_input`).
+/// 3. Count the byte; more than `RSLSF_MAX_BYTES_SCANNED` bytes: 810.
+/// 4. Apply the byte to the state machine (`apply_byte_to_scan`); stop if
+///    the copy goal has its value.
+///
+/// Loop bound: at most `RSLSF_MAX_BYTES_SCANNED + 1` byte reads (the last
+/// one triggers 810) plus one end-of-input read, plus
+/// `RSLSF_EXTRA_READ_CALLS` interrupted reads. Reaching the bound: 809.
+///
+/// # Arguments
+/// - `toml_reader`: an unbuffered `File` in production; in-memory input in tests.
+/// - `key_bytes`: the key (non-empty; checked by the public functions).
+/// - `scan_goal`: copy the first value, or count key lines.
+/// - `output_buffer`: value destination (empty slice for the count goal).
+///
+/// # Returns
+/// `Ok(ScanOutcome)` matching the goal, or `Err(808-814)`.
+fn scan_toml_reader_for_key<R: Read>(
+    toml_reader: &mut R,
+    key_bytes: &[u8],
+    scan_goal: ScanGoal,
+    output_buffer: &mut [u8],
+) -> Result<ScanOutcome, HeatmapError> {
+    let mut scan = ScanContext {
+        key_bytes,
+        scan_goal,
+        output_buffer,
+        state: LineScanState::AtLineStart,
+        write_cursor: 0,
+        unquoted_value_has_pending_cr: false,
+        key_line_count: 0,
+    };
+    let mut single_byte_scratch: [u8; 1] = [0u8; 1];
+    let mut bytes_scanned: u64 = 0;
+    let maximum_read_calls = RSLSF_MAX_BYTES_SCANNED
+        .saturating_add(2)
+        .saturating_add(RSLSF_EXTRA_READ_CALLS);
+
+    for _read_call_index in 0..maximum_read_calls {
+        let bytes_read = match toml_reader.read(&mut single_byte_scratch) {
+            Ok(count) => count,
+            Err(io_error) if io_error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_io_error) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: read failed: {}",
+                    HeatmapError::RsLsfReadFailed.code(),
+                    _io_error
+                );
+                return Err(HeatmapError::RsLsfReadFailed);
+            }
+        };
+        if bytes_read == 0 {
+            return finish_scan_at_end_of_input(&scan);
+        }
+
+        bytes_scanned = bytes_scanned.saturating_add(1);
+        if bytes_scanned > RSLSF_MAX_BYTES_SCANNED {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: file exceeds {} bytes",
+                HeatmapError::RsLsfFileExceedsScanLimit.code(),
+                RSLSF_MAX_BYTES_SCANNED
+            );
+            return Err(HeatmapError::RsLsfFileExceedsScanLimit);
+        }
+
+        let [current_byte] = single_byte_scratch;
+        if let Some(scan_outcome) = apply_byte_to_scan(&mut scan, current_byte)? {
+            return Ok(scan_outcome);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "HIX-{}: read-call limit {} reached",
+        HeatmapError::RsLsfReadCallLimitReached.code(),
+        maximum_read_calls
+    );
+    Err(HeatmapError::RsLsfReadCallLimitReached)
+}
+
+/// Applies one input byte to the state machine.
+///
+/// # Returns
+/// - `Ok(None)`: keep scanning.
+/// - `Ok(Some(ValueCopied))`: copy goal finished (value terminated).
+/// - `Err(RsLsfValueExceedsOutputBuffer)`: value longer than the buffer.
+/// - `Err(RsLsfKeyMatchIndexInvalid)`: internal invariant (see `match_key_byte`).
+fn apply_byte_to_scan(
+    scan: &mut ScanContext<'_, '_>,
+    current_byte: u8,
+) -> Result<Option<ScanOutcome>, HeatmapError> {
+    match scan.state {
+        LineScanState::AtLineStart | LineScanState::SkippingLeadingWhitespace => match current_byte
+        {
+            b'\n' => scan.state = LineScanState::AtLineStart,
+            // A CR at line start (blank CRLF line) is ignored.
+            b'\r' => {}
+            b' ' | b'\t' => scan.state = LineScanState::SkippingLeadingWhitespace,
+            b'#' => scan.state = LineScanState::InCommentToEndOfLine,
+            _ => scan.state = match_key_byte(scan.key_bytes, 0, current_byte)?,
+        },
+
+        LineScanState::MatchingKey { matched_key_bytes } => {
+            scan.state = match_key_byte(scan.key_bytes, matched_key_bytes, current_byte)?;
+        }
+
+        LineScanState::AwaitingEquals => match current_byte {
+            b' ' | b'\t' => {}
+            b'=' => match scan.scan_goal {
+                ScanGoal::CopyFirstValue => scan.state = LineScanState::AwaitingValueStart,
+                ScanGoal::CountKeyLines => {
+                    scan.key_line_count = scan.key_line_count.saturating_add(1);
+                    scan.state = LineScanState::SkippingToEndOfLine;
+                }
+            },
+            // Key matched but the line has no `=`: not an assignment.
+            b'\n' => scan.state = LineScanState::AtLineStart,
+            // E.g. `name_long` when the key is `name`: not this key.
+            _ => scan.state = LineScanState::SkippingToEndOfLine,
+        },
+
+        LineScanState::AwaitingValueStart => match current_byte {
+            b' ' | b'\t' => {}
+            b'"' => scan.state = LineScanState::CopyingQuotedValue,
+            // `key =` then newline: empty value (write_cursor is 0 here).
+            b'\n' => {
+                return Ok(Some(ScanOutcome::ValueCopied {
+                    written_length: scan.write_cursor,
+                }));
+            }
+            b'\r' => {
+                scan.unquoted_value_has_pending_cr = true;
+                scan.state = LineScanState::CopyingUnquotedValue;
+            }
+            _ => {
+                scan.push_value_byte(current_byte)?;
+                scan.state = LineScanState::CopyingUnquotedValue;
+            }
+        },
+
+        LineScanState::CopyingUnquotedValue => match current_byte {
+            // Terminator; a pending CR is the CR of a CRLF ending and is dropped.
+            b'\n' => {
+                return Ok(Some(ScanOutcome::ValueCopied {
+                    written_length: scan.write_cursor,
+                }));
+            }
+            b'\r' => {
+                // A previous pending CR was not followed by LF: it is value data.
+                if scan.unquoted_value_has_pending_cr {
+                    scan.push_value_byte(b'\r')?;
+                }
+                scan.unquoted_value_has_pending_cr = true;
+            }
+            _ => {
+                if scan.unquoted_value_has_pending_cr {
+                    scan.push_value_byte(b'\r')?;
+                    scan.unquoted_value_has_pending_cr = false;
+                }
+                scan.push_value_byte(current_byte)?;
+            }
+        },
+
+        LineScanState::CopyingQuotedValue => {
+            if current_byte == b'"' {
+                return Ok(Some(ScanOutcome::ValueCopied {
+                    written_length: scan.write_cursor,
+                }));
+            }
+            scan.push_value_byte(current_byte)?;
+        }
+
+        LineScanState::SkippingToEndOfLine | LineScanState::InCommentToEndOfLine => {
+            if current_byte == b'\n' {
+                scan.state = LineScanState::AtLineStart;
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Compares one byte against the key at position `matched_key_bytes`.
+///
+/// # Returns
+/// - `Ok(AwaitingEquals)`: this byte completed the key.
+/// - `Ok(MatchingKey { n + 1 })`: matched, key not complete yet.
+/// - `Ok(AtLineStart)`: mismatch on `\n` (short line).
+/// - `Ok(SkippingToEndOfLine)`: any other mismatch.
+/// - `Err(RsLsfKeyMatchIndexInvalid)`: `matched_key_bytes` is outside the key.
+///   Internal invariant: the state machine only stores positions < key length
+///   (an empty key is rejected before scanning).
+fn match_key_byte(
+    key_bytes: &[u8],
+    matched_key_bytes: usize,
+    current_byte: u8,
+) -> Result<LineScanState, HeatmapError> {
+    let expected_key_byte = match key_bytes.get(matched_key_bytes) {
+        Some(&key_byte) => key_byte,
+        None => {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: key-match position {} outside key of {} bytes",
+                HeatmapError::RsLsfKeyMatchIndexInvalid.code(),
+                matched_key_bytes,
+                key_bytes.len()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: key-match position {} outside key of {} bytes",
+                HeatmapError::RsLsfKeyMatchIndexInvalid.code(),
+                matched_key_bytes,
+                key_bytes.len()
+            );
+            return Err(HeatmapError::RsLsfKeyMatchIndexInvalid);
+        }
+    };
+
+    if current_byte == expected_key_byte {
+        // Cannot overflow: matched_key_bytes < key_bytes.len() was just confirmed.
+        let next_matched_key_bytes = matched_key_bytes.saturating_add(1);
+        if next_matched_key_bytes == key_bytes.len() {
+            Ok(LineScanState::AwaitingEquals)
+        } else {
+            Ok(LineScanState::MatchingKey {
+                matched_key_bytes: next_matched_key_bytes,
+            })
+        }
+    } else if current_byte == b'\n' {
+        Ok(LineScanState::AtLineStart)
+    } else {
+        Ok(LineScanState::SkippingToEndOfLine)
+    }
+}
+
+/// Decides the result when the input ends.
+///
+/// # Returns
+/// - Count goal: `Ok(KeyLinesCounted)` in any state.
+/// - Copy goal, inside a value or right after `=`:
+///   `Err(RsLsfValueUnterminatedAtEndOfFile)` (input validation).
+/// - Copy goal, any other state: `Err(RsLsfFieldNotFound)` (input validation).
+fn finish_scan_at_end_of_input(scan: &ScanContext<'_, '_>) -> Result<ScanOutcome, HeatmapError> {
+    match scan.scan_goal {
+        ScanGoal::CountKeyLines => Ok(ScanOutcome::KeyLinesCounted {
+            key_line_count: scan.key_line_count,
+        }),
+        ScanGoal::CopyFirstValue => match scan.state {
+            LineScanState::AwaitingValueStart
+            | LineScanState::CopyingUnquotedValue
+            | LineScanState::CopyingQuotedValue => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: end of file inside value of key {:?}",
+                    HeatmapError::RsLsfValueUnterminatedAtEndOfFile.code(),
+                    String::from_utf8_lossy(scan.key_bytes)
+                );
+                Err(HeatmapError::RsLsfValueUnterminatedAtEndOfFile)
+            }
+            LineScanState::AtLineStart
+            | LineScanState::SkippingLeadingWhitespace
+            | LineScanState::MatchingKey { .. }
+            | LineScanState::AwaitingEquals
+            | LineScanState::SkippingToEndOfLine
+            | LineScanState::InCommentToEndOfLine => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: key {:?} not found",
+                    HeatmapError::RsLsfFieldNotFound.code(),
+                    String::from_utf8_lossy(scan.key_bytes)
+                );
+                Err(HeatmapError::RsLsfFieldNotFound)
+            }
+        },
+    }
+}
+
+/// Extracts the value length from a copy-goal outcome.
+/// `Err(RsLsfScanOutcomeMismatch)`: internal invariant (a count result
+/// returned for a copy scan).
+fn copied_value_length_from_outcome(scan_outcome: ScanOutcome) -> Result<usize, HeatmapError> {
+    match scan_outcome {
+        ScanOutcome::ValueCopied { written_length } => Ok(written_length),
+        ScanOutcome::KeyLinesCounted { .. } => {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: copy scan returned a count",
+                HeatmapError::RsLsfScanOutcomeMismatch.code()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: copy scan returned a count",
+                HeatmapError::RsLsfScanOutcomeMismatch.code()
+            );
+            Err(HeatmapError::RsLsfScanOutcomeMismatch)
+        }
+    }
+}
+
+/// Extracts the key-line count from a count-goal outcome.
+/// `Err(RsLsfScanOutcomeMismatch)`: internal invariant (a copied value
+/// returned for a count scan).
+fn key_line_count_from_outcome(scan_outcome: ScanOutcome) -> Result<u32, HeatmapError> {
+    match scan_outcome {
+        ScanOutcome::KeyLinesCounted { key_line_count } => Ok(key_line_count),
+        ScanOutcome::ValueCopied { .. } => {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: count scan returned a value",
+                HeatmapError::RsLsfScanOutcomeMismatch.code()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: count scan returned a value",
+                HeatmapError::RsLsfScanOutcomeMismatch.code()
+            );
+            Err(HeatmapError::RsLsfScanOutcomeMismatch)
+        }
+    }
+}
+
+// ============================================================================
+// Tests (test mode only)
+// ============================================================================
+
+/*
+Default test.toml
+
+```toml
+text = "production"
+longtext = "productionproductionproductionproductionproductionproductionproduction"
+```
+*/
+
+/// Unit tests (compiled only under `cargo test`).
+///
+/// Scanner tests run `scan_toml_reader_for_key` on in-memory input
+/// (`Cursor`, `io::repeat`, and small failing readers), so they create no
+/// files. Tests of the public functions create uniquely named files under
+/// `std::env::temp_dir()` and remove them at the end; if such a test fails
+/// mid-way its file may remain (harmless, unique name).
+///
+/// Test names: `rslsf_<area>_<condition>[_with_code_<nnn>]`.
+/// Areas: `scan`, `count`, `read`, `unique`, `err`, `guard`.
+/// `unwrap`/`assert!`/indexing are allowed here (test mode).
+#[cfg(test)]
+mod read_toml_single_line_string_field_no_heap_tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+
+    /// Runs a copy-goal scan on `toml_text` with a `buffer_length`-byte
+    /// output buffer; returns the copied value bytes.
+    fn copy_first_value(
+        toml_text: &str,
+        key: &str,
+        buffer_length: usize,
+    ) -> Result<Vec<u8>, HeatmapError> {
+        let mut output_buffer = vec![0u8; buffer_length];
+        let mut toml_reader = Cursor::new(toml_text.as_bytes());
+        match scan_toml_reader_for_key(
+            &mut toml_reader,
+            key.as_bytes(),
+            ScanGoal::CopyFirstValue,
+            &mut output_buffer,
+        )? {
+            ScanOutcome::ValueCopied { written_length } => {
+                Ok(output_buffer[..written_length].to_vec())
+            }
+            ScanOutcome::KeyLinesCounted { .. } => panic!("copy scan returned a count"),
+        }
+    }
+
+    /// Runs a count-goal scan on `toml_text`; returns the key-line count.
+    fn count_key_lines(toml_text: &str, key: &str) -> Result<u32, HeatmapError> {
+        let mut toml_reader = Cursor::new(toml_text.as_bytes());
+        let mut no_value_buffer: [u8; 0] = [];
+        match scan_toml_reader_for_key(
+            &mut toml_reader,
+            key.as_bytes(),
+            ScanGoal::CountKeyLines,
+            &mut no_value_buffer,
+        )? {
+            ScanOutcome::KeyLinesCounted { key_line_count } => Ok(key_line_count),
+            ScanOutcome::ValueCopied { .. } => panic!("count scan returned a value"),
+        }
+    }
+
+    /// Writes `contents` to a uniquely named file under the temp dir and
+    /// returns its absolute path. The caller removes the file.
+    fn write_unique_temp_toml(label: &str, contents: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rslsf_test_{}_{}_{}.toml",
+            label,
+            std::process::id(),
+            nanos
+        ));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// Reader that reports "interrupted" before every real read.
+    struct InterruptEveryOtherRead {
+        inner: Cursor<Vec<u8>>,
+        interrupt_next: bool,
+    }
+
+    impl Read for InterruptEveryOtherRead {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.interrupt_next {
+                self.interrupt_next = false;
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+            self.interrupt_next = true;
+            self.inner.read(buffer)
+        }
+    }
+
+    /// Reader that reports "interrupted" forever.
+    struct AlwaysInterruptedReader;
+
+    impl Read for AlwaysInterruptedReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+        }
+    }
+
+    /// Reader whose every read fails with a non-retryable error.
+    struct AlwaysFailingReader;
+
+    impl Read for AlwaysFailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::Other))
+        }
+    }
+
+    /// Basic case: a quoted value is copied without its quotes.
+    #[test]
+    fn rslsf_scan_copies_quoted_value() {
+        assert_eq!(
+            copy_first_value("name = \"alice\"\n", "name", 16).unwrap(),
+            b"alice"
+        );
+    }
+
+    /// Unquoted values (numbers, bare words) end at the newline.
+    #[test]
+    fn rslsf_scan_copies_unquoted_value() {
+        assert_eq!(
+            copy_first_value("port = 8080\n", "port", 16).unwrap(),
+            b"8080"
+        );
+    }
+
+    /// CRLF files: the quoted value is unaffected by the CR.
+    #[test]
+    fn rslsf_scan_handles_crlf_for_quoted_value() {
+        let value = copy_first_value("name = \"bob\"\r\nother = \"x\"\r\n", "name", 16).unwrap();
+        assert_eq!(value, b"bob");
+    }
+
+    /// CRLF files: the CR before LF is not part of an unquoted value.
+    #[test]
+    fn rslsf_scan_handles_crlf_for_unquoted_value() {
+        assert_eq!(
+            copy_first_value("port = 8080\r\nx = 1\r\n", "port", 16).unwrap(),
+            b"8080"
+        );
+    }
+
+    /// Comment lines (also indented) and blank lines are skipped.
+    #[test]
+    fn rslsf_scan_skips_comments_and_blank_lines() {
+        let toml_text = "# header\n\n   # indented comment\nname = \"carol\"\n";
+        assert_eq!(copy_first_value(toml_text, "name", 16).unwrap(), b"carol");
+    }
+
+    /// A longer key that starts with the requested key is not a match.
+    #[test]
+    fn rslsf_scan_does_not_match_longer_key_with_same_prefix() {
+        let toml_text = "name_long = \"WRONG\"\nname = \"RIGHT\"\n";
+        assert_eq!(copy_first_value(toml_text, "name", 16).unwrap(), b"RIGHT");
+    }
+
+    /// A key that no line assigns is reported, not defaulted.
+    #[test]
+    fn rslsf_scan_missing_key_with_code_811() {
+        let error = copy_first_value("other = \"x\"\n", "name", 16).unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfFieldNotFound);
+        assert_eq!(error.code(), 811);
+    }
+
+    /// A value longer than the buffer (9 bytes into 8) is refused, never truncated.
+    #[test]
+    fn rslsf_scan_value_longer_than_buffer_with_code_812() {
+        let error = copy_first_value("name = \"toolongxx\"\n", "name", 8).unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfValueExceedsOutputBuffer);
+        assert_eq!(error.code(), 812);
+    }
+
+    /// A quoted value needs no trailing newline: the closing quote ends it.
+    #[test]
+    fn rslsf_scan_quoted_value_at_end_of_file_is_complete() {
+        assert_eq!(
+            copy_first_value("name = \"dora\"", "name", 16).unwrap(),
+            b"dora"
+        );
+    }
+
+    /// An unquoted value without a trailing newline is incomplete (policy:
+    /// unquoted values need `\n`, as quoted values need `"`).
+    #[test]
+    fn rslsf_scan_unquoted_value_without_newline_with_code_813() {
+        let error = copy_first_value("port = 8080", "port", 16).unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfValueUnterminatedAtEndOfFile);
+        assert_eq!(error.code(), 813);
+    }
+
+    /// A quoted value without a closing quote reads through the newline to
+    /// end of file and is reported as incomplete.
+    #[test]
+    fn rslsf_scan_quoted_value_without_closing_quote_with_code_813() {
+        let error = copy_first_value("name = \"alice\n", "name", 16).unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfValueUnterminatedAtEndOfFile);
+    }
+
+    /// The key is found after many unrelated lines.
+    #[test]
+    fn rslsf_scan_finds_key_after_many_lines() {
+        let mut toml_text = String::new();
+        for line_index in 0..200 {
+            toml_text.push_str(&format!("noise_key_{:03} = \"junkjunkjunk\"\n", line_index));
+        }
+        toml_text.push_str("target = \"eve\"\n");
+        assert_eq!(copy_first_value(&toml_text, "target", 16).unwrap(), b"eve");
+    }
+
+    /// An unrelated line far longer than the output buffer does not stop the
+    /// scan: only the matched value is stored.
+    #[test]
+    fn rslsf_scan_unrelated_long_line_does_not_stop_scan() {
+        let toml_text = format!("other_key = \"{}\"\nname = \"frank\"\n", "X".repeat(4096));
+        assert_eq!(copy_first_value(&toml_text, "name", 16).unwrap(), b"frank");
+    }
+
+    /// Spaces and tabs are allowed before the key and around `=`.
+    #[test]
+    fn rslsf_scan_allows_whitespace_around_key_and_equals() {
+        let value = copy_first_value("   name\t=\t  \"grace\"   \n", "name", 16).unwrap();
+        assert_eq!(value, b"grace");
+    }
+
+    /// The read returns the first assignment (duplicates are the optional
+    /// uniqueness check's job).
+    #[test]
+    fn rslsf_scan_first_assignment_wins() {
+        let value = copy_first_value("name = \"first\"\nname = \"second\"\n", "name", 16).unwrap();
+        assert_eq!(value, b"first");
+    }
+
+    /// Policy: spaces before the newline are part of an unquoted value.
+    #[test]
+    fn rslsf_scan_unquoted_value_keeps_trailing_whitespace() {
+        assert_eq!(
+            copy_first_value("port = 8080   \n", "port", 16).unwrap(),
+            b"8080   "
+        );
+    }
+
+    /// `key =` then newline is an empty value, not an error.
+    #[test]
+    fn rslsf_scan_empty_unquoted_value_is_empty() {
+        assert!(
+            copy_first_value("name = \n", "name", 16)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// `key = ""` is an empty value.
+    #[test]
+    fn rslsf_scan_empty_quoted_value_is_empty() {
+        assert!(
+            copy_first_value("name = \"\"\n", "name", 16)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A one-byte key completes on its first byte (general match path).
+    #[test]
+    fn rslsf_scan_single_byte_key() {
+        assert_eq!(copy_first_value("x = \"yes\"\n", "x", 16).unwrap(), b"yes");
+    }
+
+    /// Interrupted reads are retried, and the result is unchanged.
+    #[test]
+    fn rslsf_scan_retries_interrupted_reads() {
+        let mut toml_reader = InterruptEveryOtherRead {
+            inner: Cursor::new(b"name = \"ivy\"\n".to_vec()),
+            interrupt_next: true,
+        };
+        let mut output_buffer = [0u8; 16];
+        let outcome = scan_toml_reader_for_key(
+            &mut toml_reader,
+            b"name",
+            ScanGoal::CopyFirstValue,
+            &mut output_buffer,
+        )
+        .unwrap();
+        assert_eq!(outcome, ScanOutcome::ValueCopied { written_length: 3 });
+        assert_eq!(&output_buffer[..3], b"ivy");
+    }
+
+    /// Endless interruptions end at the read-call bound instead of looping forever.
+    #[test]
+    fn rslsf_scan_endless_interruptions_with_code_809() {
+        let mut output_buffer = [0u8; 16];
+        let error = scan_toml_reader_for_key(
+            &mut AlwaysInterruptedReader,
+            b"name",
+            ScanGoal::CopyFirstValue,
+            &mut output_buffer,
+        )
+        .unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfReadCallLimitReached);
+        assert_eq!(error.code(), 809);
+    }
+
+    /// A failing read stops the scan with its own code.
+    #[test]
+    fn rslsf_scan_read_failure_with_code_808() {
+        let mut output_buffer = [0u8; 16];
+        let error = scan_toml_reader_for_key(
+            &mut AlwaysFailingReader,
+            b"name",
+            ScanGoal::CopyFirstValue,
+            &mut output_buffer,
+        )
+        .unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfReadFailed);
+        assert_eq!(error.code(), 808);
+    }
+
+    /// Input larger than the scan limit (here: endless) stops at the byte cap.
+    #[test]
+    fn rslsf_scan_input_exceeds_limit_with_code_810() {
+        let mut endless_input = std::io::repeat(b'x');
+        let mut output_buffer = [0u8; 16];
+        let error = scan_toml_reader_for_key(
+            &mut endless_input,
+            b"name",
+            ScanGoal::CopyFirstValue,
+            &mut output_buffer,
+        )
+        .unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfFileExceedsScanLimit);
+        assert_eq!(error.code(), 810);
+    }
+
+    /// Key-line counting: assignments are counted; comments, longer keys,
+    /// and lines without `=` are not; indented assignments are.
+    #[test]
+    fn rslsf_count_counts_only_assignment_lines() {
+        let toml_text = "name = \"a\"\n# name = \"b\"\nname_long = \"c\"\nname\n  name=\"d\"\n";
+        assert_eq!(count_key_lines(toml_text, "name").unwrap(), 2);
+        assert_eq!(count_key_lines(toml_text, "absent").unwrap(), 0);
+    }
+
+    /// Invariant catch: a key-match position outside the key (state built
+    /// directly, simulating corruption) is rejected, not indexed.
+    #[test]
+    fn rslsf_scan_corrupt_match_position_with_code_814() {
+        let mut no_value_buffer: [u8; 0] = [];
+        let mut scan = ScanContext {
+            key_bytes: b"name",
+            scan_goal: ScanGoal::CopyFirstValue,
+            output_buffer: &mut no_value_buffer,
+            state: LineScanState::MatchingKey {
+                matched_key_bytes: 99,
+            },
+            write_cursor: 0,
+            unquoted_value_has_pending_cr: false,
+            key_line_count: 0,
+        };
+        let error = apply_byte_to_scan(&mut scan, b'a').unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfKeyMatchIndexInvalid);
+        assert_eq!(error.code(), 814);
+    }
+
+    /// Invariant catch: each goal's extractor rejects the other goal's result.
+    #[test]
+    fn rslsf_scan_outcome_mismatch_with_code_815() {
+        let error =
+            copied_value_length_from_outcome(ScanOutcome::KeyLinesCounted { key_line_count: 1 })
+                .unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfScanOutcomeMismatch);
+        assert_eq!(error.code(), 815);
+        assert_eq!(
+            key_line_count_from_outcome(ScanOutcome::ValueCopied { written_length: 0 })
+                .unwrap_err(),
+            HeatmapError::RsLsfScanOutcomeMismatch
+        );
+    }
+
+    /// End to end on a real file: value read; later buffer bytes are 0.
+    #[test]
+    fn rslsf_read_reads_value_from_file() {
+        let path = write_unique_temp_toml("read_ok", "mode = \"production\"\nport = 8080\n");
+        let (output_buffer, written_length) =
+            read_single_line_string_field_from_toml_no_heap::<16>(&path, "mode").unwrap();
+        assert_eq!(&output_buffer[..written_length], b"production");
+        assert!(
+            output_buffer[written_length..]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A relative path is refused before any file access.
+    #[test]
+    fn rslsf_read_relative_path_with_code_803() {
+        let error = read_single_line_string_field_from_toml_no_heap::<16>(
+            Path::new("relative/config.toml"),
+            "name",
+        )
+        .unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfPathNotAbsolute);
+        assert_eq!(error.code(), 803);
+    }
+
+    /// A missing file fails fast (not retryable, no backoff sleeps).
+    #[test]
+    fn rslsf_read_missing_file_with_code_804() {
+        let error = read_single_line_string_field_from_toml_no_heap::<16>(
+            Path::new("/nonexistent_rslsf_test_dir/missing.toml"),
+            "name",
+        )
+        .unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfOpenNotFound);
+        assert_eq!(error.code(), 804);
+        assert!(!error.is_retryable());
+    }
+
+    /// An empty key is refused before the path is checked or opened.
+    #[test]
+    fn rslsf_read_empty_key_with_code_801() {
+        let error = read_single_line_string_field_from_toml_no_heap::<16>(
+            Path::new("/nonexistent_rslsf_test_dir/any.toml"),
+            "",
+        )
+        .unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfEmptyKey);
+        assert_eq!(error.code(), 801);
+    }
+
+    /// A zero-size output buffer is refused before any file access.
+    #[test]
+    fn rslsf_read_zero_size_buffer_with_code_802() {
+        let error = read_single_line_string_field_from_toml_no_heap::<0>(
+            Path::new("/nonexistent_rslsf_test_dir/any.toml"),
+            "name",
+        )
+        .unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfOutputBufferZeroSized);
+        assert_eq!(error.code(), 802);
+    }
+
+    /// Uniqueness check on a real file: unique keys pass, a key assigned
+    /// twice returns 816, and the per-key count shows which key.
+    #[test]
+    fn rslsf_unique_duplicate_key_with_code_816() {
+        let path = write_unique_temp_toml("unique", "mode = \"a\"\nport = 1\nmode = \"b\"\n");
+        assert!(check_toml_keys_are_unique_no_heap(&path, &["port"]).is_ok());
+        let error = check_toml_keys_are_unique_no_heap(&path, &["port", "mode"]).unwrap_err();
+        assert_eq!(error, HeatmapError::RsLsfDuplicateKey);
+        assert_eq!(error.code(), 816);
+        assert_eq!(count_toml_key_lines_no_heap(&path, "mode").unwrap(), 2);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Retry policy is per code: only the transient open code retries.
+    #[test]
+    fn rslsf_err_is_retryable_only_transient_open() {
+        assert!(HeatmapError::RsLsfOpenTransient.is_retryable());
+        assert!(!HeatmapError::RsLsfOpenNotFound.is_retryable());
+        assert!(!HeatmapError::RsLsfReadCallLimitReached.is_retryable());
+    }
+
+    /// Single source of truth for code numbers: no message may contain the
+    /// marker followed by a digit; numbers come only from `.code()`.
+    #[test]
+    fn rslsf_guard_source_contains_no_hard_coded_error_code_numbers() {
+        let source_files: [(&str, &str); 2] = [
+            (
+                "hix_heatmap_indices_for_compute.rs",
+                include_str!("hix_heatmap_indices_for_compute.rs"),
+            ),
+            ("main.rs", include_str!("main.rs")),
+        ];
+        let marker = "RSLSF-";
+        for (file_name, source_text) in source_files.iter() {
+            for (line_index, line_text) in source_text.lines().enumerate() {
+                for (found_index, _) in line_text.match_indices(marker) {
+                    let byte_after_marker = line_text.as_bytes().get(found_index + marker.len());
+                    assert!(
+                        !matches!(byte_after_marker, Some(byte) if byte.is_ascii_digit()),
+                        "{}:{}: hard-coded error-code number: {}",
+                        file_name,
+                        line_index + 1,
+                        line_text.trim()
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -606,11 +2147,223 @@ impl AbsolutePath {
     }
 }
 
+/// True if `candidate_text` is 1..=`max_bytes` ASCII letters, digits, `_`, `-`, `.`.
+///
+/// Shared rule for run-metadata text (`RunLabel`, `WorkUnitName`): safe to
+/// print in the report, safe as a TSV field (no tabs or newlines), and safe
+/// as part of a folder name (no `/`, no spaces).
+fn is_valid_metadata_text(candidate_text: &str, max_bytes: usize) -> bool {
+    !candidate_text.is_empty()
+        && candidate_text.len() <= max_bytes
+        && candidate_text.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' || byte == b'.'
+        })
+}
+
+/// Run label, e.g. `run_005_pumpkin_world_spawn_only`. See `is_valid_metadata_text`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunLabel {
+    run_label_text: String,
+}
+
+impl RunLabel {
+    /// Validates and constructs. Input-validation error (user-facing).
+    pub fn new(candidate_text: &str) -> Result<Self, HeatmapError> {
+        if !is_valid_metadata_text(candidate_text, MAX_RUN_LABEL_BYTES) {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: invalid --run-label {:?} (1..={} of A-Z a-z 0-9 _ - .)",
+                HeatmapError::TypeRunLabelInvalid.code(),
+                candidate_text,
+                MAX_RUN_LABEL_BYTES
+            );
+            return Err(HeatmapError::TypeRunLabelInvalid);
+        }
+        Ok(Self {
+            run_label_text: candidate_text.to_string(),
+        })
+    }
+
+    /// Returns the label after re-checking validity (guards corruption).
+    pub fn get(&self) -> Result<&str, HeatmapError> {
+        if !is_valid_metadata_text(&self.run_label_text, MAX_RUN_LABEL_BYTES) {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: RunLabel corrupted",
+                HeatmapError::TypeRunLabelCorrupted.code()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: RunLabel recheck failed",
+                HeatmapError::TypeRunLabelCorrupted.code()
+            );
+            return Err(HeatmapError::TypeRunLabelCorrupted);
+        }
+        Ok(self.run_label_text.as_str())
+    }
+}
+
+/// Seconds the instrumented program ran. Valid range: 1..=MAX_RUN_DURATION_SECS.
+/// Never 0, so "per minute" figures cannot divide by zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunDurationSeconds {
+    duration_seconds: u64,
+}
+
+impl RunDurationSeconds {
+    /// Validates and constructs. Input-validation error (user-facing).
+    pub fn new(candidate_seconds: u64) -> Result<Self, HeatmapError> {
+        if candidate_seconds == 0 || candidate_seconds > MAX_RUN_DURATION_SECS {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: run duration {} outside 1..={}",
+                HeatmapError::TypeRunDurationOutOfRange.code(),
+                candidate_seconds,
+                MAX_RUN_DURATION_SECS
+            );
+            return Err(HeatmapError::TypeRunDurationOutOfRange);
+        }
+        Ok(Self {
+            duration_seconds: candidate_seconds,
+        })
+    }
+
+    /// Returns the value after re-checking validity.
+    pub fn get(&self) -> Result<u64, HeatmapError> {
+        if self.duration_seconds == 0 || self.duration_seconds > MAX_RUN_DURATION_SECS {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: RunDurationSeconds corrupted: {}",
+                HeatmapError::TypeRunDurationCorrupted.code(),
+                self.duration_seconds
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: RunDurationSeconds recheck failed: {}",
+                HeatmapError::TypeRunDurationCorrupted.code(),
+                self.duration_seconds
+            );
+            return Err(HeatmapError::TypeRunDurationCorrupted);
+        }
+        Ok(self.duration_seconds)
+    }
+}
+
+/// Work done during the run. Valid range: 1..=MAX_WORK_UNITS.
+/// Never 0, so "per work unit" figures cannot divide by zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkUnitCount {
+    work_unit_count: u64,
+}
+
+impl WorkUnitCount {
+    /// Validates and constructs. Input-validation error (user-facing).
+    pub fn new(candidate_count: u64) -> Result<Self, HeatmapError> {
+        if candidate_count == 0 || candidate_count > MAX_WORK_UNITS {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: work units {} outside 1..={}",
+                HeatmapError::TypeWorkUnitsOutOfRange.code(),
+                candidate_count,
+                MAX_WORK_UNITS
+            );
+            return Err(HeatmapError::TypeWorkUnitsOutOfRange);
+        }
+        Ok(Self {
+            work_unit_count: candidate_count,
+        })
+    }
+
+    /// Returns the value after re-checking validity.
+    pub fn get(&self) -> Result<u64, HeatmapError> {
+        if self.work_unit_count == 0 || self.work_unit_count > MAX_WORK_UNITS {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: WorkUnitCount corrupted: {}",
+                HeatmapError::TypeWorkUnitsCorrupted.code(),
+                self.work_unit_count
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: WorkUnitCount recheck failed: {}",
+                HeatmapError::TypeWorkUnitsCorrupted.code(),
+                self.work_unit_count
+            );
+            return Err(HeatmapError::TypeWorkUnitsCorrupted);
+        }
+        Ok(self.work_unit_count)
+    }
+}
+
+/// Name of the work unit, e.g. `chunks_generated`. See `is_valid_metadata_text`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkUnitName {
+    work_unit_name_text: String,
+}
+
+impl WorkUnitName {
+    /// Validates and constructs. Input-validation error (user-facing).
+    pub fn new(candidate_text: &str) -> Result<Self, HeatmapError> {
+        if !is_valid_metadata_text(candidate_text, MAX_WORK_UNIT_NAME_BYTES) {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: invalid --work-unit-name {:?} (1..={} of A-Z a-z 0-9 _ - .)",
+                HeatmapError::TypeWorkUnitNameInvalid.code(),
+                candidate_text,
+                MAX_WORK_UNIT_NAME_BYTES
+            );
+            return Err(HeatmapError::TypeWorkUnitNameInvalid);
+        }
+        Ok(Self {
+            work_unit_name_text: candidate_text.to_string(),
+        })
+    }
+
+    /// Returns the name after re-checking validity (guards corruption).
+    pub fn get(&self) -> Result<&str, HeatmapError> {
+        if !is_valid_metadata_text(&self.work_unit_name_text, MAX_WORK_UNIT_NAME_BYTES) {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: WorkUnitName corrupted",
+                HeatmapError::TypeWorkUnitNameCorrupted.code()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: WorkUnitName recheck failed",
+                HeatmapError::TypeWorkUnitNameCorrupted.code()
+            );
+            return Err(HeatmapError::TypeWorkUnitNameCorrupted);
+        }
+        Ok(self.work_unit_name_text.as_str())
+    }
+}
+
+/// Work done in the run: count and unit name, always together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkUnits {
+    count: WorkUnitCount,
+    name: WorkUnitName,
+}
+
+/// Optional description of the run that produced the LCOV.
+/// Every field is optional; absent fields print as `(not given)`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunMetadata {
+    run_label: Option<RunLabel>,
+    run_duration: Option<RunDurationSeconds>,
+    work_units: Option<WorkUnits>,
+}
+
 /// Validated run configuration produced from the command line.
 pub struct HeatmapRunConfiguration {
     lcov_input_path: AbsolutePath,
     output_directory_path: AbsolutePath,
     top_n: TopNCount,
+    run_metadata: RunMetadata,
 }
 
 // ============================================================================
@@ -702,8 +2455,7 @@ struct LoopScanStatistics {
     /// Files skipped because they could not be opened (permissions).
     files_skipped_permission_denied: usize,
     /// Files abandoned because one line's discarded remainder exceeded
-    /// `MAX_SKIPPED_LINE_BYTES`. Replaces POC-1.1's `files_skipped_line_too_long`,
-    /// which skipped a whole file for any line over `MAX_LINE_BYTES`.
+    /// `MAX_SKIPPED_LINE_BYTES`.
     files_skipped_line_exceeds_skip_cap: usize,
     /// Files abandoned because they exceed `MAX_SOURCE_LINES_PER_FILE`.
     files_skipped_too_many_lines: usize,
@@ -718,6 +2470,84 @@ struct LoopScanStatistics {
     /// Loop headers whose line has no LCOV `DA` count (not instrumented,
     /// compiled out, or a lexical false positive).
     loop_headers_without_line_data: usize,
+}
+
+/// Why a non-cold source file was not scanned for loops (exactly one reason per file).
+///
+/// # Project context
+/// Single source of truth for skip classification: the counters in
+/// `LoopScanStatistics` and the `[loop-scan file notes]` listing both use
+/// `from_scan_error`, so the counted and the listed reasons cannot disagree.
+/// Cold files are not a skip reason here: they are counted only, never listed.
+///
+/// Variant order is the listing order in the report (derives `Ord`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FileSkipReason {
+    NonAbsolutePath,
+    NotFound,
+    PermissionDenied,
+    LineExceedsSkipCap,
+    TooManyLines,
+    OtherError,
+}
+
+impl FileSkipReason {
+    /// Classifies the error that stopped one file's scan.
+    /// Codes without their own reason are "other error"; the listing still
+    /// shows the exact code, so nothing is hidden.
+    fn from_scan_error(scan_error: HeatmapError) -> Self {
+        match scan_error {
+            HeatmapError::TypePathNotAbsolute => FileSkipReason::NonAbsolutePath,
+            HeatmapError::SrcOpenNotFound => FileSkipReason::NotFound,
+            HeatmapError::SrcOpenPermissionDenied => FileSkipReason::PermissionDenied,
+            HeatmapError::SrcLineExceedsSkipCap => FileSkipReason::LineExceedsSkipCap,
+            HeatmapError::SrcTooManyLines => FileSkipReason::TooManyLines,
+            _ => FileSkipReason::OtherError,
+        }
+    }
+
+    /// Report label; matches the `[loop-scan coverage]` counter wording.
+    fn as_label(self) -> &'static str {
+        match self {
+            FileSkipReason::NonAbsolutePath => "path not absolute",
+            FileSkipReason::NotFound => "not found",
+            FileSkipReason::PermissionDenied => "permission denied",
+            FileSkipReason::LineExceedsSkipCap => "line > MAX_SKIPPED_LINE_BYTES",
+            FileSkipReason::TooManyLines => "too many lines",
+            FileSkipReason::OtherError => "other error",
+        }
+    }
+}
+
+/// One non-cold source file that was not scanned (its loops are missing).
+#[derive(Debug, Clone, Copy)]
+struct SkippedFileNote {
+    /// Index into the `FileCoverageRecord` slice (resolves to the source path).
+    source_file_index: usize,
+    reason: FileSkipReason,
+    /// Numeric code of the error that stopped the scan (from `HeatmapError::code()`).
+    error_code: u16,
+}
+
+/// One scanned source file that had over-long lines (start of each scanned, rest skipped).
+#[derive(Debug, Clone, Copy)]
+struct PartlyScannedFileNote {
+    /// Index into the `FileCoverageRecord` slice (resolves to the source path).
+    source_file_index: usize,
+    /// Number of lines longer than `MAX_LINE_BYTES` in this file.
+    overlong_line_count: usize,
+}
+
+/// Per-file details behind the `[loop-scan coverage]` counters.
+///
+/// Bounded: at most one entry per LCOV source file (`MAX_SOURCE_FILES`).
+/// Sorted by `scan_all_files_for_loops`:
+/// - skipped files by reason, then LCOV file order;
+/// - partly scanned files by over-long-line count (descending), then LCOV file order.
+#[derive(Debug, Default)]
+struct LoopScanFileNotes {
+    skipped_files: Vec<SkippedFileNote>,
+    partly_scanned_files: Vec<PartlyScannedFileNote>,
 }
 
 /// Result of scanning one source file.
@@ -760,11 +2590,55 @@ struct HeatKindSummary {
     decade_histogram: [u64; DECADE_BUCKET_COUNT],
 }
 
+/// Descriptive shape figures for one kind of site (functions or loops).
+///
+/// Experimental and descriptive: these figures summarize how counts are
+/// spread across sites, so that runs and programs can be compared. They do
+/// not by themselves indicate a problem. All `Option` figures are `None`
+/// when the kind's total count is 0.
+#[derive(Debug, Clone, Copy)]
+struct DistributionShape {
+    /// Gini over all sites (0 = all equal, 1 = one site has every count).
+    gini_all_sites: Option<f64>,
+    /// Gini over sites with count > 0 (spread among code that ran).
+    gini_counted_sites: Option<f64>,
+    /// Percent of all counts in the hottest `TOP_SHARE_NARROW_SITES` sites.
+    top_narrow_share_percent: Option<f64>,
+    /// Percent of all counts in the hottest `TOP_SHARE_WIDE_SITES` sites.
+    top_wide_share_percent: Option<f64>,
+    /// Largest run of empty decade buckets between occupied ones; `None` = no gap.
+    largest_empty_decade_gap: Option<EmptyDecadeGap>,
+    /// Largest adjacent-rank count ratio within the head; `None` = no drop.
+    largest_head_drop: Option<HeadRankDrop>,
+}
+
+/// Empty orders of magnitude between two occupied decade buckets.
+/// Bucket d (1..=20) holds counts in [10^(d-1), 10^d) (see `DECADE_BUCKET_COUNT`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EmptyDecadeGap {
+    /// Number of consecutive empty buckets.
+    empty_decade_count: usize,
+    /// Occupied bucket just below the gap.
+    lower_bucket_index: usize,
+    /// Occupied bucket just above the gap.
+    upper_bucket_index: usize,
+}
+
+/// The largest count ratio between adjacent ranks within the head.
+#[derive(Debug, Clone, Copy)]
+struct HeadRankDrop {
+    /// 0-based position of the higher site; the lower site is the next position.
+    higher_position: usize,
+    /// higher count / lower count (> 1.0).
+    drop_ratio: f64,
+}
+
 /// Which way to open a file.
 #[derive(Debug, Clone, Copy)]
 enum FileOpenPurpose {
     ReadExisting,
-    CreateTruncate,
+    /// Create a file that must not exist yet (never truncates: no overwrite).
+    CreateNew,
 }
 
 /// Per-call-site error codes for file opening, so each site keeps unique codes.
@@ -776,6 +2650,8 @@ struct OpenErrorCodes {
     not_found: HeatmapError,
     permission_denied: HeatmapError,
     transient: HeatmapError,
+    /// `AlreadyExists`: only possible for `FileOpenPurpose::CreateNew`.
+    already_exists: HeatmapError,
     other: HeatmapError,
 }
 
@@ -783,6 +2659,8 @@ const LCOV_OPEN_ERROR_CODES: OpenErrorCodes = OpenErrorCodes {
     not_found: HeatmapError::LcovOpenNotFound,
     permission_denied: HeatmapError::LcovOpenPermissionDenied,
     transient: HeatmapError::LcovOpenTransient,
+    // Read-only open cannot report AlreadyExists; if an OS ever does, it is "other".
+    already_exists: HeatmapError::LcovOpenOther,
     other: HeatmapError::LcovOpenOther,
 };
 
@@ -790,6 +2668,8 @@ const SOURCE_OPEN_ERROR_CODES: OpenErrorCodes = OpenErrorCodes {
     not_found: HeatmapError::SrcOpenNotFound,
     permission_denied: HeatmapError::SrcOpenPermissionDenied,
     transient: HeatmapError::SrcOpenTransient,
+    // Read-only open cannot report AlreadyExists; if an OS ever does, it is "other".
+    already_exists: HeatmapError::SrcOpenOther,
     other: HeatmapError::SrcOpenOther,
 };
 
@@ -797,6 +2677,7 @@ const REPORT_OPEN_ERROR_CODES: OpenErrorCodes = OpenErrorCodes {
     not_found: HeatmapError::RptOpenNotFound,
     permission_denied: HeatmapError::RptOpenPermissionDenied,
     transient: HeatmapError::RptOpenTransient,
+    already_exists: HeatmapError::RptOpenAlreadyExists,
     other: HeatmapError::RptOpenOther,
 };
 
@@ -811,17 +2692,21 @@ struct ReportInputs<'a> {
     loop_sites: &'a [HeatSite],
     loop_summary: &'a HeatKindSummary,
     loop_scan_statistics: &'a LoopScanStatistics,
+    /// Per-file details: skipped and partly scanned files.
+    loop_scan_file_notes: &'a LoopScanFileNotes,
     top_n_limit: usize,
     /// Duplicate `FN` names within a file (integrity check; expected 0).
     duplicate_function_name_count: usize,
     /// Source paths listed in more than one `SF:` record (integrity check; expected 0).
     duplicate_source_path_count: usize,
+    /// Optional run description.
+    run_metadata: &'a RunMetadata,
 }
 // ============================================================================
 // Public entry points
 // ============================================================================
 
-/// Runs POC-1 end to end using the process command line.
+/// Runs end to end using the process command line.
 ///
 /// Steps: parse args -> parse LCOV -> function sites -> loop sites ->
 /// summarize -> write text report + TSV -> print report to stdout.
@@ -905,14 +2790,15 @@ pub fn append_error_code_to_log(error_code: HeatmapError) -> Result<(), HeatmapE
 /// half-written report next to a complete one.
 ///
 /// # Steps
+/// 0. Refuse an existing `--out-dir` (preflight; nothing read or written).
 /// 1. Open and parse the LCOV file (fatal on failure: no LCOV, no data).
 /// 2. Build function sites (exact LLVM entry counts; monomorphized instances
 ///    at one source line merged), then sort + summarize them.
 /// 3. Scan non-cold source files for loop headers (Tier 2: an unreadable file
 ///    is skipped and counted, never fatal), then sort + summarize loop sites.
 /// 4. Render the text report and the all-sites TSV into memory.
-/// 5. Create the output directory, write both files, then print the text
-///    report to stdout.
+/// 5. Create the output directory (atomically; must be new), write both
+///    files (create-new), then print the text report to stdout.
 ///
 /// # Arguments
 /// - `run_configuration`: validated paths (absolute) and Top-N limit.
@@ -933,6 +2819,9 @@ fn run_heatmap_with_configuration(
     let output_directory_path = run_configuration.output_directory_path.get()?;
     let top_n_limit = usize::from(run_configuration.top_n.get()?);
 
+    // Step 0: output-directory safety preflight (fail fast, before any work).
+    check_output_path_is_new(output_directory_path)?;
+
     // Step 1: parse LCOV (fatal on failure: without it there is no data).
     let lcov_file = open_file_with_retry(
         lcov_input_path,
@@ -949,8 +2838,9 @@ fn run_heatmap_with_configuration(
 
     // Step 3: loop sites (lexical scan; per-file failures absorbed at Tier 2),
     // sorted + summarized together.
-    let (mut loop_sites, loop_scan_statistics) = scan_all_files_for_loops(&coverage_records);
-    check_loop_scan_totals(&loop_scan_statistics)?;
+    let (mut loop_sites, loop_scan_statistics, loop_scan_file_notes) =
+        scan_all_files_for_loops(&coverage_records);
+    check_loop_scan_totals(&loop_scan_statistics, &loop_scan_file_notes)?;
     let loop_summary = sort_and_summarize_sites(&mut loop_sites)?;
 
     // Step 4: render reports into memory (no disk writes yet).
@@ -966,9 +2856,11 @@ fn run_heatmap_with_configuration(
         loop_sites: &loop_sites,
         loop_summary: &loop_summary,
         loop_scan_statistics: &loop_scan_statistics,
+        loop_scan_file_notes: &loop_scan_file_notes,
         top_n_limit,
         duplicate_function_name_count,
         duplicate_source_path_count: count_duplicate_source_paths(&coverage_records),
+        run_metadata: &run_configuration.run_metadata,
     };
 
     let mut report_bytes: Vec<u8> = Vec::with_capacity(REPORT_BUFFER_INITIAL_CAPACITY);
@@ -976,16 +2868,8 @@ fn run_heatmap_with_configuration(
     let mut sites_tsv_bytes: Vec<u8> = Vec::with_capacity(REPORT_BUFFER_INITIAL_CAPACITY);
     write_sites_tsv(&mut sites_tsv_bytes, &report_inputs)?;
 
-    // Step 5: write files, then stdout.
-    if let Err(_io_error) = fs::create_dir_all(output_directory_path) {
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "HIX-{}: create_dir_all failed: {}",
-            HeatmapError::RptCreateDirectoryFailed.code(),
-            _io_error
-        );
-        return Err(HeatmapError::RptCreateDirectoryFailed);
-    }
+    // Step 5: create the new output directory (atomic), write files, then stdout.
+    create_new_output_directory(output_directory_path)?;
     write_bytes_to_new_file(&report_file_path, &report_bytes)?;
     write_bytes_to_new_file(&sites_tsv_file_path, &sites_tsv_bytes)?;
 
@@ -1016,18 +2900,81 @@ fn run_heatmap_with_configuration(
 // Command line
 // ============================================================================
 
-/// Parses `--lcov`, `--out-dir`, `--top-n` (flag/value pairs; any order).
+/// Raw `--flag value` values, collected before any validation.
+/// One field per flag; the field count equals `MAX_CLI_FLAG_PAIRS`.
+#[derive(Default)]
+struct RawCliFlagValues {
+    lcov: Option<OsString>,
+    out_dir: Option<OsString>,
+    top_n: Option<OsString>,
+    run_label: Option<OsString>,
+    run_duration_secs: Option<OsString>,
+    work_units: Option<OsString>,
+    work_unit_name: Option<OsString>,
+}
+
+/// Returns a flag value as UTF-8 text, or `not_utf8_code` (input validation).
+fn flag_value_as_text(
+    value_argument: &OsString,
+    not_utf8_code: HeatmapError,
+) -> Result<&str, HeatmapError> {
+    match value_argument.to_str() {
+        Some(text) => Ok(text),
+        None => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: flag value is not UTF-8: {:?}",
+                not_utf8_code.code(),
+                value_argument
+            );
+            Err(not_utf8_code)
+        }
+    }
+}
+
+/// Parses a flag value as `u64`, with per-flag codes (input validation).
+fn parse_u64_flag_value(
+    value_argument: &OsString,
+    not_utf8_code: HeatmapError,
+    not_a_number_code: HeatmapError,
+) -> Result<u64, HeatmapError> {
+    let value_text = flag_value_as_text(value_argument, not_utf8_code)?;
+    match value_text.parse::<u64>() {
+        Ok(value) => Ok(value),
+        Err(_parse_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: not a u64 number {:?}: {}",
+                not_a_number_code.code(),
+                value_text,
+                _parse_error
+            );
+            Err(not_a_number_code)
+        }
+    }
+}
+
+/// Parses the command line into a validated configuration.
+///
+/// # Steps
+/// 1. Collect `--flag value` pairs (any order, each flag at most once,
+///    at most `MAX_CLI_FLAG_PAIRS` pairs) into `RawCliFlagValues`.
+/// 2. Required flags: `--lcov` (104), `--out-dir` (105).
+/// 3. `--top-n` (default `DEFAULT_TOP_N`).
+/// 4. Run metadata (all optional); `--work-units` and `--work-unit-name`
+///    must be given together (115 / 116).
+/// 5. Build the enforced types (paths absolute, values in range).
+///
 /// Generic over the iterator so tests can pass synthetic arguments.
 fn parse_cli_arguments<I>(arguments: I) -> Result<HeatmapRunConfiguration, HeatmapError>
 where
     I: Iterator<Item = OsString>,
 {
     let mut remaining_arguments = arguments.skip(1); // skip program name
-    let mut lcov_path_argument: Option<PathBuf> = None;
-    let mut output_directory_argument: Option<PathBuf> = None;
-    let mut top_n_argument: Option<u16> = None;
+    let mut raw_values = RawCliFlagValues::default();
     let mut reached_end_of_arguments = false;
 
+    // Step 1: collect pairs (bounded by MAX_CLI_FLAG_PAIRS).
     for _flag_pair_index in 0..MAX_CLI_FLAG_PAIRS {
         let flag_argument = match remaining_arguments.next() {
             Some(flag) => flag,
@@ -1040,41 +2987,14 @@ where
             Some(value) => value,
             None => return Err(HeatmapError::CliMissingFlagValue),
         };
-
-        match flag_argument.to_str() {
-            Some("--lcov") => {
-                if lcov_path_argument.is_some() {
-                    return Err(HeatmapError::CliDuplicateFlag);
-                }
-                lcov_path_argument = Some(PathBuf::from(value_argument));
-            }
-            Some("--out-dir") => {
-                if output_directory_argument.is_some() {
-                    return Err(HeatmapError::CliDuplicateFlag);
-                }
-                output_directory_argument = Some(PathBuf::from(value_argument));
-            }
-            Some("--top-n") => {
-                if top_n_argument.is_some() {
-                    return Err(HeatmapError::CliDuplicateFlag);
-                }
-                let top_n_text = match value_argument.to_str() {
-                    Some(text) => text,
-                    None => return Err(HeatmapError::CliTopNNotUtf8),
-                };
-                match top_n_text.parse::<u16>() {
-                    Ok(parsed_top_n) => top_n_argument = Some(parsed_top_n),
-                    Err(_parse_error) => {
-                        #[cfg(debug_assertions)]
-                        eprintln!(
-                            "HIX-{}: --top-n parse failed: {}",
-                            HeatmapError::CliTopNNotANumber.code(),
-                            _parse_error
-                        );
-                        return Err(HeatmapError::CliTopNNotANumber);
-                    }
-                }
-            }
+        let value_slot = match flag_argument.to_str() {
+            Some("--lcov") => &mut raw_values.lcov,
+            Some("--out-dir") => &mut raw_values.out_dir,
+            Some("--top-n") => &mut raw_values.top_n,
+            Some("--run-label") => &mut raw_values.run_label,
+            Some("--run-duration-secs") => &mut raw_values.run_duration_secs,
+            Some("--work-units") => &mut raw_values.work_units,
+            Some("--work-unit-name") => &mut raw_values.work_unit_name,
             _ => {
                 #[cfg(debug_assertions)]
                 eprintln!(
@@ -1084,26 +3004,92 @@ where
                 );
                 return Err(HeatmapError::CliUnknownFlag);
             }
+        };
+        if value_slot.is_some() {
+            return Err(HeatmapError::CliDuplicateFlag);
         }
+        *value_slot = Some(value_argument);
     }
 
     if !reached_end_of_arguments && remaining_arguments.next().is_some() {
         return Err(HeatmapError::CliTooManyArguments);
     }
 
-    let lcov_path = match lcov_path_argument {
-        Some(path) => path,
+    // Step 2: required flags.
+    let lcov_path = match raw_values.lcov {
+        Some(value) => PathBuf::from(value),
         None => return Err(HeatmapError::CliMissingLcovPath),
     };
-    let output_directory = match output_directory_argument {
-        Some(path) => path,
+    let output_directory = match raw_values.out_dir {
+        Some(value) => PathBuf::from(value),
         None => return Err(HeatmapError::CliMissingOutputDirectory),
     };
 
+    // Step 3: --top-n.
+    let top_n_value = match &raw_values.top_n {
+        None => DEFAULT_TOP_N,
+        Some(value_argument) => {
+            let top_n_text = flag_value_as_text(value_argument, HeatmapError::CliTopNNotUtf8)?;
+            match top_n_text.parse::<u16>() {
+                Ok(parsed_top_n) => parsed_top_n,
+                Err(_parse_error) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "HIX-{}: --top-n parse failed: {}",
+                        HeatmapError::CliTopNNotANumber.code(),
+                        _parse_error
+                    );
+                    return Err(HeatmapError::CliTopNNotANumber);
+                }
+            }
+        }
+    };
+
+    // Step 4: run metadata (optional).
+    let run_label = match &raw_values.run_label {
+        None => None,
+        Some(value_argument) => Some(RunLabel::new(flag_value_as_text(
+            value_argument,
+            HeatmapError::CliRunLabelNotUtf8,
+        )?)?),
+    };
+    let run_duration = match &raw_values.run_duration_secs {
+        None => None,
+        Some(value_argument) => Some(RunDurationSeconds::new(parse_u64_flag_value(
+            value_argument,
+            HeatmapError::CliRunDurationNotUtf8,
+            HeatmapError::CliRunDurationNotANumber,
+        )?)?),
+    };
+    let work_units = match (&raw_values.work_units, &raw_values.work_unit_name) {
+        (None, None) => None,
+        (Some(_), None) => return Err(HeatmapError::CliWorkUnitsWithoutName),
+        (None, Some(_)) => return Err(HeatmapError::CliWorkUnitNameWithoutUnits),
+        (Some(count_argument), Some(name_argument)) => {
+            let count_value = parse_u64_flag_value(
+                count_argument,
+                HeatmapError::CliWorkUnitsNotUtf8,
+                HeatmapError::CliWorkUnitsNotANumber,
+            )?;
+            let name_text =
+                flag_value_as_text(name_argument, HeatmapError::CliWorkUnitNameNotUtf8)?;
+            Some(WorkUnits {
+                count: WorkUnitCount::new(count_value)?,
+                name: WorkUnitName::new(name_text)?,
+            })
+        }
+    };
+
+    // Step 5: enforced types.
     Ok(HeatmapRunConfiguration {
         lcov_input_path: AbsolutePath::new(lcov_path)?,
         output_directory_path: AbsolutePath::new(output_directory)?,
-        top_n: TopNCount::new(top_n_argument.unwrap_or(DEFAULT_TOP_N))?,
+        top_n: TopNCount::new(top_n_value)?,
+        run_metadata: RunMetadata {
+            run_label,
+            run_duration,
+            work_units,
+        },
     })
 }
 
@@ -1111,9 +3097,115 @@ where
 // File helpers
 // ============================================================================
 
+/// Preflight: succeeds only if nothing exists at `output_directory_path`.
+///
+/// # Project context
+/// Run and analysis folders are a permanent record (`run_NNN_<scenario>`,
+/// `analysis_NNN_<purpose>`). Reusing a name could overwrite or mix earlier
+/// results. This check runs before the LCOV is parsed, so a name collision
+/// stops the run at once instead of after minutes of analysis.
+///
+/// `symlink_metadata` is used (not `exists()`), so a dangling symlink also
+/// counts as "exists", and a permission problem is reported, not mistaken
+/// for "does not exist".
+///
+/// # Returns
+/// - `Ok(())`: the path does not exist.
+/// - `Err(RptOutputPathAlreadyExists)`: any entry exists there (input validation).
+/// - `Err(RptOutputPathCheckFailed)`: existence could not be determined.
+///
+/// # Modes
+/// Input validation (user-chosen path): debug builds print the path; no panic.
+fn check_output_path_is_new(output_directory_path: &Path) -> Result<(), HeatmapError> {
+    match fs::symlink_metadata(output_directory_path) {
+        Ok(_existing_metadata) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: --out-dir already exists (HIX never overwrites): {}",
+                HeatmapError::RptOutputPathAlreadyExists.code(),
+                output_directory_path.display()
+            );
+            Err(HeatmapError::RptOutputPathAlreadyExists)
+        }
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: cannot check --out-dir {}: {}",
+                HeatmapError::RptOutputPathCheckFailed.code(),
+                output_directory_path.display(),
+                _io_error
+            );
+            Err(HeatmapError::RptOutputPathCheckFailed)
+        }
+    }
+}
+
+/// Creates the output directory, which must not exist; creates its parent if missing.
+///
+/// # Project context
+/// The second half of output-directory safety. `fs::create_dir` fails if
+/// the path exists, so creation and the existence check are one atomic step:
+/// if anything created the directory after `check_output_path_is_new`, this
+/// returns an error instead of writing into it. Only the parent (e.g. the
+/// `run_NNN_<scenario>` folder) may already exist or be created here.
+///
+/// # Returns
+/// - `Ok(())`: the directory was newly created by this call.
+/// - `Err(RptOutputPathHasNoParent)`: the path has no parent (e.g. `/`).
+/// - `Err(RptOutputParentCreateFailed)`: the parent could not be created.
+/// - `Err(RptOutputDirectoryAppearedDuringRun)`: the path exists now.
+/// - `Err(RptCreateDirectoryFailed)`: any other creation failure.
+fn create_new_output_directory(output_directory_path: &Path) -> Result<(), HeatmapError> {
+    let parent_directory = match output_directory_path.parent() {
+        Some(parent) => parent,
+        None => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: --out-dir has no parent: {}",
+                HeatmapError::RptOutputPathHasNoParent.code(),
+                output_directory_path.display()
+            );
+            return Err(HeatmapError::RptOutputPathHasNoParent);
+        }
+    };
+    if let Err(_io_error) = fs::create_dir_all(parent_directory) {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: create parent {} failed: {}",
+            HeatmapError::RptOutputParentCreateFailed.code(),
+            parent_directory.display(),
+            _io_error
+        );
+        return Err(HeatmapError::RptOutputParentCreateFailed);
+    }
+    match fs::create_dir(output_directory_path) {
+        Ok(()) => Ok(()),
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::AlreadyExists => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: --out-dir appeared during the run: {}",
+                HeatmapError::RptOutputDirectoryAppearedDuringRun.code(),
+                output_directory_path.display()
+            );
+            Err(HeatmapError::RptOutputDirectoryAppearedDuringRun)
+        }
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: create_dir failed: {}",
+                HeatmapError::RptCreateDirectoryFailed.code(),
+                _io_error
+            );
+            Err(HeatmapError::RptCreateDirectoryFailed)
+        }
+    }
+}
+
 /// Maps an I/O error kind to the caller's site-specific error codes.
 fn classify_open_error(io_error_kind: std::io::ErrorKind, codes: OpenErrorCodes) -> HeatmapError {
     match io_error_kind {
+        std::io::ErrorKind::AlreadyExists => codes.already_exists,
         std::io::ErrorKind::NotFound => codes.not_found,
         std::io::ErrorKind::PermissionDenied => codes.permission_denied,
         std::io::ErrorKind::Interrupted
@@ -1132,7 +3224,10 @@ fn open_file_with_retry(
     for attempt_index in 0..MAX_OPEN_ATTEMPTS {
         let open_result = match purpose {
             FileOpenPurpose::ReadExisting => File::open(file_path),
-            FileOpenPurpose::CreateTruncate => File::create(file_path),
+            FileOpenPurpose::CreateNew => OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(file_path),
         };
         match open_result {
             Ok(opened_file) => return Ok(opened_file),
@@ -1168,7 +3263,7 @@ fn open_file_with_retry(
 fn write_bytes_to_new_file(file_path: &Path, file_bytes: &[u8]) -> Result<(), HeatmapError> {
     let mut output_file = open_file_with_retry(
         file_path,
-        FileOpenPurpose::CreateTruncate,
+        FileOpenPurpose::CreateNew,
         REPORT_OPEN_ERROR_CODES,
     )?;
     if let Err(_io_error) = output_file.write_all(file_bytes) {
@@ -1233,8 +3328,7 @@ fn read_bounded_line<R: BufRead>(
 ///
 /// # Project context
 /// Some files in large projects are generated, with whole data tables written
-/// on one line. In POC-1.1 one such line made the scanner skip the entire
-/// file, so every loop in it became invisible (4 files in Pumpkin run 1).
+/// on one line.
 /// The loop scan only ever looks at the *start* of a line (loop keywords,
 /// `//`, `/*`), so keeping the start and discarding the rest loses nothing
 /// the scan uses. The LCOV parser does not use this function: an over-long
@@ -1519,7 +3613,7 @@ fn parse_one_lcov_line(
         || lcov_line_text.starts_with("FNDA:")
         || lcov_line_text.starts_with("DA:");
     if !is_used_entry {
-        // TN, FNF, FNH, LF, LH, BRDA, BRF, BRH, blank: not used in POC-1.
+        // TN, FNF, FNH, LF, LH, BRDA, BRF, BRH, blank
         return Ok(());
     }
 
@@ -1746,38 +3840,39 @@ fn count_duplicate_source_paths(records: &[FileCoverageRecord]) -> usize {
 // ============================================================================
 // Loop sites (lexical scan, no AST)
 // ============================================================================
-
 /// Scans every non-cold source file for loop headers and collects LOOP sites.
 ///
 /// # Project context
 /// This is the "prioritization step" plus the per-file loop scan. A file
 /// whose every LCOV line count is 0 cannot contain a hot loop, so it is
-/// skipped without being opened (61% of files in Pumpkin run 1). This is how
-/// the tool stays fast on very large codebases.
+/// skipped without being opened.
+/// This is how the tool stays fast on very large codebases.
 ///
 /// # Steps (per source file listed in the LCOV)
 /// 1. Count the file in `files_total`.
-/// 2. Skip it if it is cold (every line count is 0).
-/// 3. Skip it if its LCOV path is not absolute.
+/// 2. Skip it if it is cold (every line count is 0): counted, not listed.
+/// 3. Skip it if its LCOV path is not absolute: counted and listed.
 /// 4. Otherwise open and scan it (`scan_one_source_file`).
-///    - Success: add its loop sites and counters, including over-long lines.
-///    - Failure (Tier 2): skip the file, count the reason, continue.
-///
-/// # Arguments
-/// - `records`: parsed LCOV records, one per source file.
+///    - Success: add its loop sites and counters. If it had over-long lines,
+///      list it as partly scanned.
+///    - Failure (Tier 2): skip the file, count and list the reason, continue.
+/// 5. Sort the notes (see `LoopScanFileNotes`) so the report is deterministic.
 ///
 /// # Returns
-/// `(loop_sites, statistics)`. Never fails: per-file problems are absorbed
-/// and counted, so one unreadable file cannot stop the whole analysis.
-/// Loop sites are in file order (NOT sorted): pass them to
+/// `(loop_sites, statistics, file_notes)`. Never fails: per-file problems
+/// are absorbed, counted, and listed, so one unreadable file cannot stop the
+/// analysis. Loop sites are in file order (NOT sorted): pass them to
 /// `sort_and_summarize_sites`.
 ///
 /// # Modes
 /// Debug builds print the path and error for each skipped file. Production
-/// builds print nothing; the counts appear in the report.
-fn scan_all_files_for_loops(records: &[FileCoverageRecord]) -> (Vec<HeatSite>, LoopScanStatistics) {
+/// builds print nothing; the counts and the listing appear in the report.
+fn scan_all_files_for_loops(
+    records: &[FileCoverageRecord],
+) -> (Vec<HeatSite>, LoopScanStatistics, LoopScanFileNotes) {
     let mut all_loop_sites: Vec<HeatSite> = Vec::new();
     let mut scan_statistics = LoopScanStatistics::default();
+    let mut file_notes = LoopScanFileNotes::default();
 
     for (file_index, record) in records.iter().enumerate() {
         scan_statistics.files_total = scan_statistics.files_total.saturating_add(1);
@@ -1792,10 +3887,13 @@ fn scan_all_files_for_loops(records: &[FileCoverageRecord]) -> (Vec<HeatSite>, L
         let absolute_source_path = match AbsolutePath::new(PathBuf::from(&record.source_path_text))
         {
             Ok(path) => path,
-            Err(_type_error) => {
-                scan_statistics.files_skipped_non_absolute_path = scan_statistics
-                    .files_skipped_non_absolute_path
-                    .saturating_add(1);
+            Err(type_error) => {
+                record_skipped_file(
+                    &mut scan_statistics,
+                    &mut file_notes,
+                    file_index,
+                    type_error,
+                );
                 continue;
             }
         };
@@ -1816,6 +3914,10 @@ fn scan_all_files_for_loops(records: &[FileCoverageRecord]) -> (Vec<HeatSite>, L
                     scan_statistics.files_with_overlong_source_lines = scan_statistics
                         .files_with_overlong_source_lines
                         .saturating_add(1);
+                    file_notes.partly_scanned_files.push(PartlyScannedFileNote {
+                        source_file_index: file_index,
+                        overlong_line_count: scan_outcome.overlong_lines_found,
+                    });
                 }
                 all_loop_sites.extend(scan_outcome.loop_sites);
             }
@@ -1825,58 +3927,105 @@ fn scan_all_files_for_loops(records: &[FileCoverageRecord]) -> (Vec<HeatSite>, L
                     "loop scan skipped {}: {}",
                     record.source_path_text, scan_error
                 );
-                // Tier 2: absorb, count by reason, continue with the next file.
-                match scan_error {
-                    HeatmapError::SrcOpenNotFound => {
-                        scan_statistics.files_skipped_not_found =
-                            scan_statistics.files_skipped_not_found.saturating_add(1);
-                    }
-                    HeatmapError::SrcOpenPermissionDenied => {
-                        scan_statistics.files_skipped_permission_denied = scan_statistics
-                            .files_skipped_permission_denied
-                            .saturating_add(1);
-                    }
-                    HeatmapError::SrcLineExceedsSkipCap => {
-                        scan_statistics.files_skipped_line_exceeds_skip_cap = scan_statistics
-                            .files_skipped_line_exceeds_skip_cap
-                            .saturating_add(1);
-                    }
-                    HeatmapError::SrcTooManyLines => {
-                        scan_statistics.files_skipped_too_many_lines = scan_statistics
-                            .files_skipped_too_many_lines
-                            .saturating_add(1);
-                    }
-                    _ => {
-                        scan_statistics.files_skipped_other_error =
-                            scan_statistics.files_skipped_other_error.saturating_add(1);
-                    }
-                }
+                // Tier 2: absorb, count and list by reason, continue with the next file.
+                record_skipped_file(
+                    &mut scan_statistics,
+                    &mut file_notes,
+                    file_index,
+                    scan_error,
+                );
             }
         }
     }
-    (all_loop_sites, scan_statistics)
+
+    file_notes
+        .skipped_files
+        .sort_by_key(|note| (note.reason, note.source_file_index));
+    file_notes
+        .partly_scanned_files
+        .sort_by(|left_note, right_note| {
+            right_note
+                .overlong_line_count
+                .cmp(&left_note.overlong_line_count)
+                .then_with(|| {
+                    left_note
+                        .source_file_index
+                        .cmp(&right_note.source_file_index)
+                })
+        });
+    (all_loop_sites, scan_statistics, file_notes)
 }
 
-/// Checks that every source file listed in the LCOV was counted exactly
-/// once: either as scanned, or under exactly one skip reason.
+/// Counts one skipped (non-cold) file under its reason and lists it.
+///
+/// The counter and the listing are updated together, from one
+/// classification (`FileSkipReason::from_scan_error`), so they cannot drift
+/// apart. `check_loop_scan_totals` verifies this structurally (code 408).
+fn record_skipped_file(
+    scan_statistics: &mut LoopScanStatistics,
+    file_notes: &mut LoopScanFileNotes,
+    file_index: usize,
+    scan_error: HeatmapError,
+) {
+    let skip_reason = FileSkipReason::from_scan_error(scan_error);
+    let reason_counter = match skip_reason {
+        FileSkipReason::NonAbsolutePath => &mut scan_statistics.files_skipped_non_absolute_path,
+        FileSkipReason::NotFound => &mut scan_statistics.files_skipped_not_found,
+        FileSkipReason::PermissionDenied => &mut scan_statistics.files_skipped_permission_denied,
+        FileSkipReason::LineExceedsSkipCap => {
+            &mut scan_statistics.files_skipped_line_exceeds_skip_cap
+        }
+        FileSkipReason::TooManyLines => &mut scan_statistics.files_skipped_too_many_lines,
+        FileSkipReason::OtherError => &mut scan_statistics.files_skipped_other_error,
+    };
+    *reason_counter = reason_counter.saturating_add(1);
+    file_notes.skipped_files.push(SkippedFileNote {
+        source_file_index: file_index,
+        reason: skip_reason,
+        error_code: scan_error.code(),
+    });
+}
+
+/// Checks that the loop-scan bookkeeping is complete and self-consistent.
 ///
 /// # Project context
-/// The `[loop-scan coverage]` block promises that no file goes unexplained.
-/// This check makes that promise structural: if a later edit adds a skip
-/// path but forgets its counter, the run stops with a code instead of
-/// printing figures that silently do not add up.
+/// The `[loop-scan coverage]` block promises that no file goes unexplained,
+/// and the `[loop-scan file notes]` block promises to name every
+/// file behind the non-cold skip counters and the over-long-line counter.
+/// This function makes both promises structural: if a later edit adds a skip
+/// path but forgets its counter, or updates a counter without listing the
+/// file, the run stops with a code instead of printing figures that silently
+/// do not add up.
+///
+/// # Checks (in order; the first failure returns)
+/// 1. Totals (code 407): `files_scanned` + every skip counter (including
+///    cold) == `files_total`. Every LCOV file is counted in exactly one place.
+/// 2. Listing (code 408):
+///    - listed skipped files == sum of the six non-cold skip counters
+///      (cold files are counted only, never listed), and
+///    - listed partly scanned files == `files_with_overlong_source_lines`.
 ///
 /// # Arguments
 /// - `statistics`: the counters returned by `scan_all_files_for_loops`.
+/// - `file_notes`: the per-file listing returned by `scan_all_files_for_loops`.
 ///
 /// # Returns
-/// - `Ok(())` when scanned + every skip reason == `files_total`.
-/// - `Err(AnaLoopScanTotalsMismatch)` when they differ, or if the sum overflows.
+/// - `Ok(())` when both checks hold.
+/// - `Err(AnaLoopScanTotalsMismatch)`: check 1 failed, or its sum overflowed.
+/// - `Err(AnaLoopScanFileNotesMismatch)`: check 2 failed, or its sum overflowed.
 ///
 /// # Modes
-/// Debug builds (not test) panic via `debug_assert!`; test and debug builds
-/// print the two totals; production-release returns the code only.
-fn check_loop_scan_totals(statistics: &LoopScanStatistics) -> Result<(), HeatmapError> {
+/// Both checks are internal invariants (they cannot fail when the code is
+/// correct and memory is sound). Debug builds (not test) panic via
+/// `debug_assert!`; test and debug builds print the compared values;
+/// production-release returns the code only.
+fn check_loop_scan_totals(
+    statistics: &LoopScanStatistics,
+    file_notes: &LoopScanFileNotes,
+) -> Result<(), HeatmapError> {
+    // ------------------------------------------------------------------
+    // Check 1 (code 407): scanned + all skip reasons == files listed in the LCOV.
+    // ------------------------------------------------------------------
     let accounted_parts: [usize; 8] = [
         statistics.files_scanned,
         statistics.files_skipped_cold,
@@ -1894,9 +4043,10 @@ fn check_loop_scan_totals(statistics: &LoopScanStatistics) -> Result<(), Heatmap
             None => return Err(HeatmapError::AnaLoopScanTotalsMismatch),
         };
     }
+    // The summing loop has ended; compare only now, after every part is added.
 
     // --- Check: scanned + all skip reasons == files listed in the LCOV ---
-    // internal invariant — every file is counted in exactly one place.
+    // internal invariant: every file is counted in exactly one place.
     if accounted_files != statistics.files_total {
         #[cfg(all(debug_assertions, not(test)))]
         debug_assert!(
@@ -1915,6 +4065,56 @@ fn check_loop_scan_totals(statistics: &LoopScanStatistics) -> Result<(), Heatmap
         );
         return Err(HeatmapError::AnaLoopScanTotalsMismatch);
     }
+
+    // ------------------------------------------------------------------
+    // Check 2 (code 408): listed files == counted files.
+    // ------------------------------------------------------------------
+    let non_cold_skip_parts: [usize; 6] = [
+        statistics.files_skipped_non_absolute_path,
+        statistics.files_skipped_not_found,
+        statistics.files_skipped_permission_denied,
+        statistics.files_skipped_line_exceeds_skip_cap,
+        statistics.files_skipped_too_many_lines,
+        statistics.files_skipped_other_error,
+    ];
+    let mut counted_non_cold_skips: usize = 0;
+    for part in non_cold_skip_parts.iter() {
+        counted_non_cold_skips = match counted_non_cold_skips.checked_add(*part) {
+            Some(sum) => sum,
+            None => return Err(HeatmapError::AnaLoopScanFileNotesMismatch),
+        };
+    }
+    // The summing loop has ended; compare only now, after every part is added.
+
+    // --- Check: listed skipped / partly scanned files == their counters ---
+    // internal invariant: each counter and its listing are updated together
+    // (see `record_skipped_file` and the over-long branch in
+    // `scan_all_files_for_loops`).
+    let listing_matches = file_notes.skipped_files.len() == counted_non_cold_skips
+        && file_notes.partly_scanned_files.len() == statistics.files_with_overlong_source_lines;
+    if !listing_matches {
+        #[cfg(all(debug_assertions, not(test)))]
+        debug_assert!(
+            false,
+            "HIX-{}: listed skips {} vs counted {}; listed partly scanned {} vs counted {}",
+            HeatmapError::AnaLoopScanFileNotesMismatch.code(),
+            file_notes.skipped_files.len(),
+            counted_non_cold_skips,
+            file_notes.partly_scanned_files.len(),
+            statistics.files_with_overlong_source_lines
+        );
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: listed skips {} vs counted {}; listed partly scanned {} vs counted {}",
+            HeatmapError::AnaLoopScanFileNotesMismatch.code(),
+            file_notes.skipped_files.len(),
+            counted_non_cold_skips,
+            file_notes.partly_scanned_files.len(),
+            statistics.files_with_overlong_source_lines
+        );
+        return Err(HeatmapError::AnaLoopScanFileNotesMismatch);
+    }
+
     Ok(())
 }
 
@@ -2280,7 +4480,7 @@ fn sort_sites_hottest_first(sites: &mut [HeatSite]) {
 /// no panic, just misleading numbers in the report.
 ///
 /// This function exists so that no caller can summarize without sorting.
-/// (One POC-1.1 call path lost its sort during an edit; this closes that gap.)
+/// (A test call path lost its sort during an edit; this closes that gap.)
 ///
 /// # Arguments
 /// - `sites`: all function sites, or all loop sites (one kind only; counts of
@@ -2386,6 +4586,231 @@ fn percent_of_site_count(part: usize, whole: usize) -> f64 {
     (part as f64) * 100.0 / (whole as f64)
 }
 
+/// Computes the descriptive distribution-shape figures for one kind of site.
+///
+/// # Project context
+/// Concentration ("the hottest K sites carry P%") says how top-heavy counts
+/// are. The shape figures add how the counts are spread: evenly or in
+/// separated clusters, and whether the head falls off a cliff between two
+/// adjacent ranks. They help compare runs and programs; they are descriptive
+/// only (marked experimental in the report).
+///
+/// # Definitions
+/// - Gini, with sites in ascending order x_1..x_n (i = 1..n) and total T:
+///   `G = 2 * sum(i * x_i) / (n * T) - (n + 1) / n`. Computed over all sites,
+///   and over sites with count > 0. Clamped to [0, 1] against float rounding.
+/// - Top shares: percent of T carried by the hottest `TOP_SHARE_NARROW_SITES`
+///   and `TOP_SHARE_WIDE_SITES` sites.
+/// - Empty-decade gap: see `find_largest_empty_decade_gap`.
+/// - Head drop: see `find_largest_head_drop`; the head is the sites that
+///   carry the last concentration target (e.g. 99%) of counts.
+///
+/// # Arguments
+/// - `sorted_sites`: one kind's sites, hottest-first (checked here).
+/// - `summary`: that kind's summary from `summarize_sorted_sites`.
+///
+/// # Returns
+/// - `Ok(DistributionShape)`.
+/// - `Err(AnaShapeInputNotSorted)`: input not hottest-first (internal invariant).
+/// - `Err(AnaShapeSumOverflow)`: a u128 sum overflowed (not reachable within
+///   the `MAX_COVERAGE_ENTRIES` input bound; checked anyway).
+fn compute_distribution_shape(
+    sorted_sites: &[HeatSite],
+    summary: &HeatKindSummary,
+) -> Result<DistributionShape, HeatmapError> {
+    // --- Check: sites are sorted hottest-first ---
+    // internal invariant: callers pass the output of `sort_and_summarize_sites`.
+    let out_of_order = sorted_sites.windows(2).any(
+        |pair| matches!(pair, [higher, lower] if higher.execution_count < lower.execution_count),
+    );
+    if out_of_order {
+        #[cfg(all(debug_assertions, not(test)))]
+        debug_assert!(
+            false,
+            "HIX-{}: distribution-shape input not sorted hottest-first",
+            HeatmapError::AnaShapeInputNotSorted.code()
+        );
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: distribution-shape input not sorted hottest-first",
+            HeatmapError::AnaShapeInputNotSorted.code()
+        );
+        return Err(HeatmapError::AnaShapeInputNotSorted);
+    }
+
+    let site_count = sorted_sites.len();
+    // Sorted hottest-first, so every counted site comes before every zero site.
+    let counted_site_count = sorted_sites
+        .iter()
+        .filter(|site| site.execution_count > 0)
+        .count();
+
+    let mut total_count: u128 = 0;
+    let mut weighted_sum_all_sites: u128 = 0;
+    let mut weighted_sum_counted_sites: u128 = 0;
+    let mut top_narrow_count: u128 = 0;
+    let mut top_wide_count: u128 = 0;
+
+    for (position, site) in sorted_sites.iter().enumerate() {
+        let count = u128::from(site.execution_count);
+        total_count = match total_count.checked_add(count) {
+            Some(sum) => sum,
+            None => return Err(HeatmapError::AnaShapeSumOverflow),
+        };
+        if position < TOP_SHARE_NARROW_SITES {
+            top_narrow_count = match top_narrow_count.checked_add(count) {
+                Some(sum) => sum,
+                None => return Err(HeatmapError::AnaShapeSumOverflow),
+            };
+        }
+        if position < TOP_SHARE_WIDE_SITES {
+            top_wide_count = match top_wide_count.checked_add(count) {
+                Some(sum) => sum,
+                None => return Err(HeatmapError::AnaShapeSumOverflow),
+            };
+        }
+        if count == 0 {
+            continue;
+        }
+        // Ascending rank i (1 = coldest) from hottest-first position.
+        let ascending_rank_all = site_count.saturating_sub(position) as u128;
+        let ascending_rank_counted = counted_site_count.saturating_sub(position) as u128;
+        let weighted_all = match ascending_rank_all.checked_mul(count) {
+            Some(product) => product,
+            None => return Err(HeatmapError::AnaShapeSumOverflow),
+        };
+        let weighted_counted = match ascending_rank_counted.checked_mul(count) {
+            Some(product) => product,
+            None => return Err(HeatmapError::AnaShapeSumOverflow),
+        };
+        weighted_sum_all_sites = match weighted_sum_all_sites.checked_add(weighted_all) {
+            Some(sum) => sum,
+            None => return Err(HeatmapError::AnaShapeSumOverflow),
+        };
+        weighted_sum_counted_sites = match weighted_sum_counted_sites.checked_add(weighted_counted)
+        {
+            Some(sum) => sum,
+            None => return Err(HeatmapError::AnaShapeSumOverflow),
+        };
+    }
+
+    let last_target_index = CONCENTRATION_TARGET_COUNT.saturating_sub(1);
+    let head_site_count = summary
+        .sites_reaching_percent
+        .get(last_target_index)
+        .copied()
+        .unwrap_or(0);
+
+    Ok(DistributionShape {
+        gini_all_sites: gini_from_weighted_sum(weighted_sum_all_sites, total_count, site_count),
+        gini_counted_sites: gini_from_weighted_sum(
+            weighted_sum_counted_sites,
+            total_count,
+            counted_site_count,
+        ),
+        top_narrow_share_percent: share_of_total_percent(top_narrow_count, total_count),
+        top_wide_share_percent: share_of_total_percent(top_wide_count, total_count),
+        largest_empty_decade_gap: find_largest_empty_decade_gap(&summary.decade_histogram),
+        largest_head_drop: find_largest_head_drop(sorted_sites, head_site_count),
+    })
+}
+
+/// Gini from `sum(i * x_i)` (ascending ranks), the total, and the site count.
+/// `None` when the total or the site count is 0. Clamped to [0, 1].
+fn gini_from_weighted_sum(weighted_sum: u128, total_count: u128, site_count: usize) -> Option<f64> {
+    if total_count == 0 || site_count == 0 {
+        return None;
+    }
+    let site_count_float = site_count as f64;
+    let gini = (2.0 * (weighted_sum as f64)) / (site_count_float * (total_count as f64))
+        - (site_count_float + 1.0) / site_count_float;
+    Some(gini.max(0.0).min(1.0))
+}
+
+/// Percent of `part` in `total`; `None` when the total is 0.
+fn share_of_total_percent(part: u128, total_count: u128) -> Option<f64> {
+    if total_count == 0 {
+        return None;
+    }
+    Some((part as f64) * 100.0 / (total_count as f64))
+}
+
+/// Finds the longest run of empty decade buckets between two occupied ones.
+///
+/// Only buckets 1..=20 (counts >= 1) are considered; bucket 0 (count = 0)
+/// is not an order of magnitude. Empty buckets below the lowest or above the
+/// highest occupied bucket are not gaps. On ties the lowest gap is kept.
+///
+/// # Returns
+/// `Some(EmptyDecadeGap)` for the largest gap, or `None` if there is no gap.
+fn find_largest_empty_decade_gap(
+    decade_histogram: &[u64; DECADE_BUCKET_COUNT],
+) -> Option<EmptyDecadeGap> {
+    let mut previous_occupied_bucket: Option<usize> = None;
+    let mut largest_gap: Option<EmptyDecadeGap> = None;
+    for (bucket_index, bucket_site_count) in decade_histogram.iter().enumerate().skip(1) {
+        if *bucket_site_count == 0 {
+            continue;
+        }
+        if let Some(previous_bucket) = previous_occupied_bucket {
+            let empty_decade_count = bucket_index
+                .saturating_sub(previous_bucket)
+                .saturating_sub(1);
+            let is_larger = empty_decade_count > 0
+                && largest_gap
+                    .map(|gap| empty_decade_count > gap.empty_decade_count)
+                    .unwrap_or(true);
+            if is_larger {
+                largest_gap = Some(EmptyDecadeGap {
+                    empty_decade_count,
+                    lower_bucket_index: previous_bucket,
+                    upper_bucket_index: bucket_index,
+                });
+            }
+        }
+        previous_occupied_bucket = Some(bucket_index);
+    }
+    largest_gap
+}
+
+/// Finds the largest count ratio between adjacent ranks within the head
+/// (the first `head_site_count` sites of a hottest-first list).
+///
+/// Pairs whose lower count is 0 are skipped (the ratio is undefined; zero
+/// sites are reported separately). Only ratios > 1.0 count as drops. On ties
+/// the hottest pair is kept.
+///
+/// # Returns
+/// `Some(HeadRankDrop)`, or `None` if the head has fewer than 2 sites or no drop.
+fn find_largest_head_drop(
+    sorted_sites: &[HeatSite],
+    head_site_count: usize,
+) -> Option<HeadRankDrop> {
+    let head_length = head_site_count.min(sorted_sites.len());
+    let head_sites = sorted_sites.get(..head_length).unwrap_or(&[]);
+    let mut largest_drop: Option<HeadRankDrop> = None;
+    for (higher_position, pair) in head_sites.windows(2).enumerate() {
+        if let [higher_site, lower_site] = pair {
+            if lower_site.execution_count == 0 {
+                continue;
+            }
+            let drop_ratio =
+                (higher_site.execution_count as f64) / (lower_site.execution_count as f64);
+            let is_larger = drop_ratio > 1.0
+                && largest_drop
+                    .map(|drop| drop_ratio > drop.drop_ratio)
+                    .unwrap_or(true);
+            if is_larger {
+                largest_drop = Some(HeadRankDrop {
+                    higher_position,
+                    drop_ratio,
+                });
+            }
+        }
+    }
+    largest_drop
+}
+
 // ============================================================================
 // Reports
 // ============================================================================
@@ -2427,6 +4852,139 @@ fn lookup_source_path(
     }
 }
 
+/// Writes the `[loop-scan file notes]` section: which files were skipped
+/// (and why), and which were only partly scanned.
+///
+/// # Project context
+/// `[loop-scan coverage]` gives counts; this section names the files behind
+/// them, so a reader can see exactly where loop data is missing or partial.
+/// Cold files are counted only (they cannot contain hot loops), never listed.
+/// Each list shows its full total, then at most `top_n_limit` rows.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(RptBufferWriteFailed | AnaFileIndexInvalid)`.
+fn write_loop_scan_file_notes<W: Write>(
+    report_writer: &mut W,
+    inputs: &ReportInputs,
+) -> Result<(), HeatmapError> {
+    let file_notes = inputs.loop_scan_file_notes;
+    writeln!(
+        report_writer,
+        "[loop-scan file notes]  (cold files are counted above, not listed)"
+    )
+    .map_err(report_buffer_write_error)?;
+
+    writeln!(
+        report_writer,
+        "  skipped files (not scanned; their loops are missing): {}   (showing up to {})",
+        file_notes.skipped_files.len(),
+        inputs.top_n_limit
+    )
+    .map_err(report_buffer_write_error)?;
+    for note in file_notes.skipped_files.iter().take(inputs.top_n_limit) {
+        let source_path_text = lookup_source_path(inputs.records, note.source_file_index)?;
+        writeln!(
+            report_writer,
+            "    {:<30}  code {:>3}  {}",
+            note.reason.as_label(),
+            note.error_code,
+            source_path_text
+        )
+        .map_err(report_buffer_write_error)?;
+    }
+
+    writeln!(
+        report_writer,
+        "  partly scanned files (over-long lines: start scanned, rest skipped): {}   (showing up to {})",
+        file_notes.partly_scanned_files.len(),
+        inputs.top_n_limit
+    )
+    .map_err(report_buffer_write_error)?;
+    for note in file_notes
+        .partly_scanned_files
+        .iter()
+        .take(inputs.top_n_limit)
+    {
+        let source_path_text = lookup_source_path(inputs.records, note.source_file_index)?;
+        writeln!(
+            report_writer,
+            "    {:>6} over-long lines  {}",
+            note.overlong_line_count, source_path_text
+        )
+        .map_err(report_buffer_write_error)?;
+    }
+    Ok(())
+}
+
+/// Writes the run-metadata lines of `[provenance]`.
+///
+/// Every line is always present (`(not given)` when absent), so reports have
+/// a fixed layout. Work units per minute is shown only when both duration and
+/// work units were given (both are >= 1 by type, so no division by zero).
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(RptBufferWriteFailed)`, or a `Type*Corrupted` code from a `.get()` recheck.
+fn write_run_metadata_provenance<W: Write>(
+    report_writer: &mut W,
+    run_metadata: &RunMetadata,
+) -> Result<(), HeatmapError> {
+    match &run_metadata.run_label {
+        Some(run_label) => writeln!(
+            report_writer,
+            "  run label               : {}",
+            run_label.get()?
+        ),
+        None => writeln!(report_writer, "  run label               : (not given)"),
+    }
+    .map_err(report_buffer_write_error)?;
+
+    let duration_seconds = match &run_metadata.run_duration {
+        Some(run_duration) => Some(run_duration.get()?),
+        None => None,
+    };
+    match duration_seconds {
+        Some(seconds) => writeln!(
+            report_writer,
+            "  run duration            : {} s ({:.2} min)",
+            seconds,
+            (seconds as f64) / 60.0
+        ),
+        None => writeln!(report_writer, "  run duration            : (not given)"),
+    }
+    .map_err(report_buffer_write_error)?;
+
+    let work_unit_values = match &run_metadata.work_units {
+        Some(work_units) => Some((work_units.count.get()?, work_units.name.get()?)),
+        None => None,
+    };
+    match work_unit_values {
+        Some((unit_count, unit_name)) => writeln!(
+            report_writer,
+            "  work units              : {} {}",
+            unit_count, unit_name
+        ),
+        None => writeln!(report_writer, "  work units              : (not given)"),
+    }
+    .map_err(report_buffer_write_error)?;
+
+    match (duration_seconds, work_unit_values) {
+        (Some(seconds), Some((unit_count, unit_name))) => writeln!(
+            report_writer,
+            "  work units per minute   : {:.2} {}/min",
+            (unit_count as f64) * 60.0 / (seconds as f64),
+            unit_name
+        ),
+        _ => writeln!(
+            report_writer,
+            "  work units per minute   : n/a (needs --run-duration-secs and --work-units)"
+        ),
+    }
+    .map_err(report_buffer_write_error)?;
+    Ok(())
+}
+
 /// Writes the human-readable text report.
 ///
 /// # Project context
@@ -2436,14 +4994,16 @@ fn lookup_source_path(
 /// traced back to its method and its known limitations.
 ///
 /// # Sections, in order
-/// 1. Title (states the phase: POC-1.2).
-/// 2. `[provenance]`: input and output paths, measurement method, meaning of
-///    each count, loop-detection method, over-long-line handling, and
-///    integrity counters.
+/// 1. Title.
+/// 2. `[provenance]`: input and output paths, run metadata, measurement
+///    method, meaning of each count, loop-detection method, over-long-line
+///    handling, and integrity counters.
 /// 3. `[loop-scan coverage]`: every LCOV source file counted as scanned or
 ///    under exactly one skip reason, plus over-long-line and loop-header counters.
-/// 4. `[FUNCTIONS]` and `[LOOPS]` (see `write_heat_kind_section`).
-/// 5. `[CO-COUNT GROUPS]` (see `write_co_count_groups`).
+/// 4. `[loop-scan file notes]`: the skipped and partly scanned files by name.
+/// 5. `[FUNCTIONS]` and `[LOOPS]` (see `write_heat_kind_section`).
+/// 6. `[DISTRIBUTION SHAPE]`, experimental (see `write_distribution_shape_section`).
+/// 7. `[CO-COUNT GROUPS]` (see `write_co_count_groups`).
 ///
 /// # Arguments
 /// - `report_writer`: in-memory report buffer.
@@ -2459,7 +5019,7 @@ fn write_text_report<W: Write>(
     let stats = inputs.loop_scan_statistics;
     writeln!(
         report_writer,
-        "hix_heatmap_indices_for_compute :: POC-1.2 count-heat report"
+        "hix_heatmap_indices_for_compute :: count-heat report"
     )
     .map_err(report_buffer_write_error)?;
     writeln!(
@@ -2488,6 +5048,7 @@ fn write_text_report<W: Write>(
         inputs.sites_tsv_file_path.display()
     )
     .map_err(report_buffer_write_error)?;
+    write_run_metadata_provenance(report_writer, inputs.run_metadata)?;
     writeln!(report_writer, "  measurement method      : LLVM source-based coverage counters (rustc -C instrument-coverage); exact counts, not samples").map_err(report_buffer_write_error)?;
     writeln!(report_writer, "  run stop condition      : D = whenever the instrumented program exited cleanly (no in-tool cap)").map_err(report_buffer_write_error)?;
     writeln!(report_writer, "  function count meaning  : entry count (LCOV FNDA); monomorphized instances at one source line are summed").map_err(report_buffer_write_error)?;
@@ -2504,11 +5065,8 @@ fn write_text_report<W: Write>(
             MAX_LINE_BYTES
         )
         .map_err(report_buffer_write_error)?;
-    writeln!(
-        report_writer,
-        "  time-heat               : NOT measured in POC-1.x"
-    )
-    .map_err(report_buffer_write_error)?;
+    writeln!(report_writer, "  time-heat               : ...")
+        .map_err(report_buffer_write_error)?;
     writeln!(
         report_writer,
         "  source files in lcov    : {}",
@@ -2600,6 +5158,9 @@ fn write_text_report<W: Write>(
     .map_err(report_buffer_write_error)?;
     writeln!(report_writer).map_err(report_buffer_write_error)?;
 
+    write_loop_scan_file_notes(report_writer, inputs)?;
+    writeln!(report_writer).map_err(report_buffer_write_error)?;
+
     write_heat_kind_section(
         report_writer,
         "FUNCTIONS",
@@ -2619,6 +5180,8 @@ fn write_text_report<W: Write>(
         inputs.records,
         inputs.top_n_limit,
     )?;
+    writeln!(report_writer).map_err(report_buffer_write_error)?;
+    write_distribution_shape_section(report_writer, inputs)?;
     writeln!(report_writer).map_err(report_buffer_write_error)?;
     write_co_count_groups(report_writer, inputs)?;
     Ok(())
@@ -2789,6 +5352,207 @@ fn write_heat_kind_section<W: Write>(
     Ok(())
 }
 
+/// Writes the `[DISTRIBUTION SHAPE]` section for functions and loops.
+///
+/// Marked experimental in the report: the figures are descriptive, for
+/// comparing runs and programs, and are not verdicts. Definitions are in
+/// `compute_distribution_shape`; a one-line legend is printed with the section.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(RptBufferWriteFailed)`, or a code from `compute_distribution_shape` /
+///   `write_distribution_shape_for_kind`.
+fn write_distribution_shape_section<W: Write>(
+    report_writer: &mut W,
+    inputs: &ReportInputs,
+) -> Result<(), HeatmapError> {
+    let last_target_percent = CONCENTRATION_TARGETS_PERCENT
+        .get(CONCENTRATION_TARGET_COUNT.saturating_sub(1))
+        .copied()
+        .unwrap_or(100);
+    writeln!(
+        report_writer,
+        "[DISTRIBUTION SHAPE]  (experimental: descriptive figures for comparing runs; not verdicts)"
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  gini            : 0 = every site has the same count; 1 = one site has every count"
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  empty-decade gap: orders of magnitude with no sites between occupied ones (a smooth spread has none)"
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "  head drop       : largest count ratio between adjacent ranks among the sites carrying {}% of counts",
+        last_target_percent
+    )
+    .map_err(report_buffer_write_error)?;
+    write_distribution_shape_for_kind(
+        report_writer,
+        "FUNCTIONS",
+        inputs.function_sites,
+        inputs.function_summary,
+        inputs.records,
+    )?;
+    write_distribution_shape_for_kind(
+        report_writer,
+        "LOOPS",
+        inputs.loop_sites,
+        inputs.loop_summary,
+        inputs.records,
+    )?;
+    Ok(())
+}
+
+/// Writes the distribution-shape figures for one kind of site.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(RptBufferWriteFailed | AnaShapeInputNotSorted | AnaShapeSumOverflow |
+///   AnaShapeDropIndexInvalid | AnaFileIndexInvalid | TypeLineNumberCorrupted)`.
+fn write_distribution_shape_for_kind<W: Write>(
+    report_writer: &mut W,
+    kind_title: &str,
+    sorted_sites: &[HeatSite],
+    summary: &HeatKindSummary,
+    records: &[FileCoverageRecord],
+) -> Result<(), HeatmapError> {
+    let shape = compute_distribution_shape(sorted_sites, summary)?;
+    writeln!(report_writer, "  {}", kind_title).map_err(report_buffer_write_error)?;
+
+    // All four figures exist exactly when the kind's total count is > 0.
+    let (gini_all, gini_counted, top_narrow_share, top_wide_share) = match (
+        shape.gini_all_sites,
+        shape.gini_counted_sites,
+        shape.top_narrow_share_percent,
+        shape.top_wide_share_percent,
+    ) {
+        (Some(gini_all), Some(gini_counted), Some(top_narrow), Some(top_wide)) => {
+            (gini_all, gini_counted, top_narrow, top_wide)
+        }
+        _ => {
+            writeln!(report_writer, "    n/a (total count is 0)")
+                .map_err(report_buffer_write_error)?;
+            return Ok(());
+        }
+    };
+
+    let top_narrow_label = format!("top-{} share", TOP_SHARE_NARROW_SITES);
+    let top_wide_label = format!("top-{} share", TOP_SHARE_WIDE_SITES);
+    let head_percent = CONCENTRATION_TARGETS_PERCENT
+        .get(CONCENTRATION_TARGET_COUNT.saturating_sub(1))
+        .copied()
+        .unwrap_or(100);
+    let head_drop_label = format!("largest drop within {}% head", head_percent);
+
+    writeln!(
+        report_writer,
+        "    {:<32}: {:.4}",
+        "gini, all sites", gini_all
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "    {:<32}: {:.4}",
+        "gini, sites with count > 0", gini_counted
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "    {:<32}: {:.4}%",
+        top_narrow_label, top_narrow_share
+    )
+    .map_err(report_buffer_write_error)?;
+    writeln!(
+        report_writer,
+        "    {:<32}: {:.4}%",
+        top_wide_label, top_wide_share
+    )
+    .map_err(report_buffer_write_error)?;
+
+    match shape.largest_empty_decade_gap {
+        Some(gap) => writeln!(
+            report_writer,
+            "    {:<32}: {} empty order(s) of magnitude: no sites with counts in [1e{}, 1e{})",
+            "largest empty-decade gap",
+            gap.empty_decade_count,
+            gap.lower_bucket_index,
+            gap.upper_bucket_index.saturating_sub(1)
+        ),
+        None => writeln!(
+            report_writer,
+            "    {:<32}: none",
+            "largest empty-decade gap"
+        ),
+    }
+    .map_err(report_buffer_write_error)?;
+
+    match shape.largest_head_drop {
+        Some(drop) => {
+            let lower_position = match drop.higher_position.checked_add(1) {
+                Some(position) => position,
+                None => return Err(HeatmapError::AnaShapeDropIndexInvalid),
+            };
+            let (higher_site, lower_site) = match (
+                sorted_sites.get(drop.higher_position),
+                sorted_sites.get(lower_position),
+            ) {
+                (Some(higher_site), Some(lower_site)) => (higher_site, lower_site),
+                _ => {
+                    #[cfg(all(debug_assertions, not(test)))]
+                    debug_assert!(
+                        false,
+                        "HIX-{}: drop position {} invalid",
+                        HeatmapError::AnaShapeDropIndexInvalid.code(),
+                        drop.higher_position
+                    );
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "HIX-{}: drop position {} invalid",
+                        HeatmapError::AnaShapeDropIndexInvalid.code(),
+                        drop.higher_position
+                    );
+                    return Err(HeatmapError::AnaShapeDropIndexInvalid);
+                }
+            };
+            writeln!(
+                report_writer,
+                "    {:<32}: {:.4}x  rank {} -> {}  (count {} -> {})",
+                head_drop_label,
+                drop.drop_ratio,
+                drop.higher_position.saturating_add(1),
+                lower_position.saturating_add(1),
+                higher_site.execution_count,
+                lower_site.execution_count
+            )
+            .map_err(report_buffer_write_error)?;
+            for (direction_label, site) in [("from", higher_site), ("to  ", lower_site)] {
+                let source_path_text = lookup_source_path(records, site.source_file_index)?;
+                let line_value = site.line_number.get()?;
+                writeln!(
+                    report_writer,
+                    "      {}  {}:{}  {}",
+                    direction_label, source_path_text, line_value, site.display_name
+                )
+                .map_err(report_buffer_write_error)?;
+            }
+        }
+        None => {
+            writeln!(
+                report_writer,
+                "    {:<32}: none (fewer than 2 head sites, or equal counts)",
+                head_drop_label
+            )
+            .map_err(report_buffer_write_error)?;
+        }
+    }
+    Ok(())
+}
+
 /// Writes the CO-COUNT GROUPS section: hot sites (functions and loops
 /// together) whose exact counts are identical.
 ///
@@ -2935,34 +5699,46 @@ fn write_co_count_groups<W: Write>(
 ///
 /// # Project context
 /// The TSV is the machine-readable data product: complete (not Top-N), with
-/// stable identity `source_path` + `line`, intended for POC-2 to join
+/// stable identity `source_path` + `line`, intended to join
 /// time-heat (perf) onto count-heat.
 ///
 /// # Column contract (append-only)
 /// `kind, rank, count, percent_of_kind, log10_count, source_path, line, name,
-/// merged_instances, per_enclosing_call`. New columns are only ever appended
-/// at the end, so tools that read existing columns by position keep working.
+/// merged_instances, per_enclosing_call` and, only when `--work-units` was
+/// given, `count_per_work_unit`. New columns are only ever
+/// appended at the end, so tools that read existing columns by position keep
+/// working.
 /// Empty fields: `log10_count` when count is 0; `per_enclosing_call` for
 /// function rows and for loops without a nonzero enclosing count.
 /// Fields are not escaped (documented limitation).
 ///
 /// # Returns
-/// - `Ok(())`, or an error code from `write_tsv_rows` / `RptBufferWriteFailed`.
+/// - `Ok(())`, or an error code from `write_tsv_rows` / `RptBufferWriteFailed` /
+///   `TypeWorkUnitsCorrupted`.
 fn write_sites_tsv<W: Write>(
     tsv_writer: &mut W,
     inputs: &ReportInputs,
 ) -> Result<(), HeatmapError> {
-    writeln!(
+    let work_unit_count = match &inputs.run_metadata.work_units {
+        Some(work_units) => Some(work_units.count.get()?),
+        None => None,
+    };
+    write!(
         tsv_writer,
         "kind\trank\tcount\tpercent_of_kind\tlog10_count\tsource_path\tline\tname\tmerged_instances\tper_enclosing_call"
     )
     .map_err(report_buffer_write_error)?;
+    if work_unit_count.is_some() {
+        write!(tsv_writer, "\tcount_per_work_unit").map_err(report_buffer_write_error)?;
+    }
+    writeln!(tsv_writer).map_err(report_buffer_write_error)?;
     write_tsv_rows(
         tsv_writer,
         "function",
         inputs.function_sites,
         inputs.function_summary,
         inputs.records,
+        work_unit_count,
     )?;
     write_tsv_rows(
         tsv_writer,
@@ -2970,6 +5746,7 @@ fn write_sites_tsv<W: Write>(
         inputs.loop_sites,
         inputs.loop_summary,
         inputs.records,
+        work_unit_count,
     )?;
     Ok(())
 }
@@ -2983,6 +5760,22 @@ fn write_sites_tsv<W: Write>(
 /// - `sorted_sites`: one kind's sites, hottest-first (rank = position + 1).
 /// - `summary`: that kind's summary (its total is the percent denominator).
 /// - `records`: used to resolve each site's file index to its source path.
+/// - `work_unit_count`: `Some(n)` (n >= 1) appends `count_per_work_unit`.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(RptBufferWriteFailed | AnaFileIndexInvalid | TypeLineNumberCorrupted)`.
+/// Writes the TSV rows for one kind of site (see `write_sites_tsv` for the
+/// column contract).
+///
+/// # Arguments
+/// - `tsv_writer`: in-memory TSV buffer.
+/// - `kind_label`: `"function"` or `"loop"` (first column).
+/// - `sorted_sites`: one kind's sites, hottest-first (rank = position + 1).
+/// - `summary`: that kind's summary (its total is the percent denominator).
+/// - `records`: used to resolve each site's file index to its source path.
+/// - `work_unit_count`: `Some(n)` (n >= 1) appends column 11,
+///   `count_per_work_unit`, to every row; `None` writes 10 columns.
 ///
 /// # Returns
 /// - `Ok(())`.
@@ -2993,11 +5786,14 @@ fn write_tsv_rows<W: Write>(
     sorted_sites: &[HeatSite],
     summary: &HeatKindSummary,
     records: &[FileCoverageRecord],
+    work_unit_count: Option<u64>,
 ) -> Result<(), HeatmapError> {
     for (rank_index, site) in sorted_sites.iter().enumerate() {
         let source_path_text = lookup_source_path(records, site.source_file_index)?;
         let line_value = site.line_number.get()?;
         let share_percent = percent_of_total(site.execution_count, summary.total_count);
+
+        // Columns 1-4: kind, rank, count, percent_of_kind (each followed by a tab).
         write!(
             tsv_writer,
             "{}\t{}\t{}\t{:.6}\t",
@@ -3007,16 +5803,24 @@ fn write_tsv_rows<W: Write>(
             share_percent
         )
         .map_err(report_buffer_write_error)?;
+
+        // Column 5: log10_count (empty when count is 0).
         if site.execution_count > 0 {
             write!(tsv_writer, "{:.4}", (site.execution_count as f64).log10())
                 .map_err(report_buffer_write_error)?;
         }
+
+        // Columns 6-9: source_path, line, name, merged_instances
+        // (the leading tab ends column 5; the trailing tab starts column 10).
         write!(
             tsv_writer,
             "\t{}\t{}\t{}\t{}\t",
             source_path_text, line_value, site.display_name, site.merged_instance_count
         )
         .map_err(report_buffer_write_error)?;
+
+        // Column 10: per_enclosing_call (empty for functions, and for loops
+        // without a nonzero enclosing count).
         if let Some(enclosing_entry_count) = site.enclosing_function_entry_count {
             if enclosing_entry_count > 0 {
                 write!(
@@ -3027,6 +5831,19 @@ fn write_tsv_rows<W: Write>(
                 .map_err(report_buffer_write_error)?;
             }
         }
+
+        // Column 11 (only when work units were given): count_per_work_unit.
+        // Written for every row, outside the column-10 block above.
+        if let Some(unit_count) = work_unit_count {
+            write!(
+                tsv_writer,
+                "\t{:.6}",
+                (site.execution_count as f64) / (unit_count as f64)
+            )
+            .map_err(report_buffer_write_error)?;
+        }
+
+        // End of row.
         writeln!(tsv_writer).map_err(report_buffer_write_error)?;
     }
     Ok(())
@@ -3046,6 +5863,12 @@ fn write_tsv_rows<W: Write>(
 /// Areas: `cli`, `type`, `lcov`, `src` (loop scan), `ana` (analysis),
 /// `rpt` (report output), `err` (error-code policy), `guard`
 /// (single-source-of-truth checks on the source text itself).
+///
+/// Most tests use in-memory input (`std::io::Cursor`) and synthetic sites.
+/// Output-safety tests (`rpt_*` for codes 510–515) create and remove
+/// uniquely named entries under `std::env::temp_dir()`; if such a test
+/// fails mid-way, its temp entry may remain (harmless, unique name).
+/// `unwrap`/`assert!` are allowed here (test mode).
 #[cfg(test)]
 mod hix_heatmap_indices_for_compute_tests {
     use super::*;
@@ -3103,13 +5926,30 @@ fn idle() {}\n";
         }
     }
 
-    /// Renders the text report for synthetic site lists.
+    /// Renders the text report for synthetic site lists (no file notes, Top-N 10).
     /// Sites must already be hottest-first (callers pass sorted vectors).
     fn render_text_report(
         records: &[FileCoverageRecord],
         function_sites: &[HeatSite],
         loop_sites: &[HeatSite],
     ) -> String {
+        render_text_report_with_notes(
+            records,
+            function_sites,
+            loop_sites,
+            &LoopScanFileNotes::default(),
+            10,
+        )
+    }
+    /// Renders the text report and the TSV for synthetic inputs.
+    fn render_reports(
+        records: &[FileCoverageRecord],
+        function_sites: &[HeatSite],
+        loop_sites: &[HeatSite],
+        file_notes: &LoopScanFileNotes,
+        run_metadata: &RunMetadata,
+        top_n_limit: usize,
+    ) -> (String, String) {
         let function_summary = summarize_sorted_sites(function_sites).unwrap();
         let loop_summary = summarize_sorted_sites(loop_sites).unwrap();
         let statistics = LoopScanStatistics::default();
@@ -3126,13 +5966,39 @@ fn idle() {}\n";
             loop_sites,
             loop_summary: &loop_summary,
             loop_scan_statistics: &statistics,
-            top_n_limit: 10,
+            loop_scan_file_notes: file_notes,
+            run_metadata,
+            top_n_limit,
             duplicate_function_name_count: 0,
             duplicate_source_path_count: 0,
         };
         let mut report_bytes: Vec<u8> = Vec::new();
         write_text_report(&mut report_bytes, &inputs).unwrap();
-        String::from_utf8(report_bytes).unwrap()
+        let mut tsv_bytes: Vec<u8> = Vec::new();
+        write_sites_tsv(&mut tsv_bytes, &inputs).unwrap();
+        (
+            String::from_utf8(report_bytes).unwrap(),
+            String::from_utf8(tsv_bytes).unwrap(),
+        )
+    }
+
+    /// Renders the text report with explicit file notes and Top-N limit.
+    fn render_text_report_with_notes(
+        records: &[FileCoverageRecord],
+        function_sites: &[HeatSite],
+        loop_sites: &[HeatSite],
+        file_notes: &LoopScanFileNotes,
+        top_n_limit: usize,
+    ) -> String {
+        render_reports(
+            records,
+            function_sites,
+            loop_sites,
+            file_notes,
+            &RunMetadata::default(),
+            top_n_limit,
+        )
+        .0
     }
 
     /// LCOV parsing: one SF record with all FN/DA entries and the file max count.
@@ -3294,7 +6160,7 @@ fn idle() {}\n";
         assert_eq!(summary.decade_histogram[2], 1); // 90
     }
 
-    /// Regression guard for the POC-1.1 missing-sort bug: unsorted input must
+    /// Regression guard: Unsorted input must
     /// produce the same concentration as sorted input.
     /// (Unsorted summarize of [1, 9, 0, 90] would wrongly report 4 sites for 50%.)
     #[test]
@@ -3411,6 +6277,8 @@ fn idle() {}\n";
         let report_path = std::env::temp_dir().join("r.txt");
         let tsv_path = std::env::temp_dir().join("s.tsv");
         let lcov_path = std::env::temp_dir().join("in.lcov");
+        let file_notes = LoopScanFileNotes::default();
+        let run_metadata = RunMetadata::default();
         let inputs = ReportInputs {
             lcov_input_path: &lcov_path,
             report_file_path: &report_path,
@@ -3421,10 +6289,13 @@ fn idle() {}\n";
             loop_sites: &loop_sites,
             loop_summary: &loop_summary,
             loop_scan_statistics: &statistics,
+            loop_scan_file_notes: &file_notes,
             top_n_limit: 10,
             duplicate_function_name_count: 0,
             duplicate_source_path_count: 0,
+            run_metadata: &run_metadata,
         };
+
         let mut report_bytes: Vec<u8> = Vec::new();
         write_text_report(&mut report_bytes, &inputs).unwrap();
         let report_text = String::from_utf8(report_bytes).unwrap();
@@ -3432,6 +6303,7 @@ fn idle() {}\n";
         assert!(report_text.contains("[LOOPS]"));
         assert!(report_text.contains("[CO-COUNT GROUPS]"));
         assert!(report_text.contains("2 instances merged"));
+        assert!(report_text.contains("[loop-scan file notes]"));
 
         let mut tsv_bytes: Vec<u8> = Vec::new();
         write_sites_tsv(&mut tsv_bytes, &inputs).unwrap();
@@ -3471,7 +6343,7 @@ fn idle() {}\n";
         parse_lcov_reader(&mut Cursor::new(lcov_text.as_bytes())).unwrap()
     }
 
-    /// POC-1.2-A acceptance test: a 70 KiB line no longer skips the file;
+    /// A 70 KiB line no longer skips the file;
     /// the loop on the following line is found with the correct line number,
     /// count, and enclosing-function count.
     #[test]
@@ -3644,14 +6516,15 @@ fn idle() {}\n";
             files_skipped_cold: 2,
             ..LoopScanStatistics::default()
         };
-        assert!(check_loop_scan_totals(&consistent).is_ok());
+        assert!(check_loop_scan_totals(&consistent, &LoopScanFileNotes::default()).is_ok());
 
         let inconsistent = LoopScanStatistics {
             files_total: 3,
             files_scanned: 1,
             ..LoopScanStatistics::default()
         };
-        let error = check_loop_scan_totals(&inconsistent).unwrap_err();
+        let error =
+            check_loop_scan_totals(&inconsistent, &LoopScanFileNotes::default()).unwrap_err();
         assert_eq!(error, HeatmapError::AnaLoopScanTotalsMismatch);
         assert_eq!(error.code(), 407);
     }
@@ -3669,7 +6542,7 @@ fn idle() {}\n";
     /// The cold-tail line derives its ceiling from the last concentration
     /// target (99 -> "<= 1%"), not from typed-in text.
     #[test]
-    fn rpt_write_heat_kind_section_cold_tail_uses_last_target() {
+    fn rpt_writeheat_kind_section_cold_tail_uses_last_target() {
         let records = parse_sample();
         let function_sites = vec![make_site(90, 1), make_site(9, 2), make_site(1, 3)];
         let report_text = render_text_report(&records, &function_sites, &[]);
@@ -3695,6 +6568,14 @@ fn idle() {}\n";
             "/abs/out",
             "--top-n",
             "5",
+            "--run-label",
+            "run_005_pumpkin",
+            "--run-duration-secs",
+            "300",
+            "--work-units",
+            "1200",
+            "--work-unit-name",
+            "chunks_generated",
             "--extra",
             "x",
         ])
@@ -3827,5 +6708,585 @@ fn idle() {}\n";
         let error = lookup_source_path(&records, 99).unwrap_err();
         assert_eq!(error, HeatmapError::AnaFileIndexInvalid);
         assert_eq!(error.code(), 402);
+    }
+    /// A unique path under the temp dir (not created). Unique per test label,
+    /// process, and time, so parallel tests never collide.
+    fn unique_temp_path(test_label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "hix_test_{}_{}_{}",
+            test_label,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    /// Preflight: an existing directory (the temp dir itself) is refused.
+    #[test]
+    fn rpt_check_output_path_is_new_existing_with_code_510() {
+        let error = check_output_path_is_new(&std::env::temp_dir()).unwrap_err();
+        assert_eq!(error, HeatmapError::RptOutputPathAlreadyExists);
+        assert_eq!(error.code(), 510);
+        assert!(error.is_cli_usage_error()); // main shows the usage text
+    }
+
+    /// Preflight: a path that does not exist passes (nothing is created).
+    #[test]
+    fn rpt_check_output_path_is_new_missing_path_passes() {
+        let missing_path = unique_temp_path("preflight_missing");
+        assert!(check_output_path_is_new(&missing_path).is_ok());
+        assert!(!missing_path.exists());
+    }
+
+    /// `/` has no parent: refused without touching the filesystem.
+    #[test]
+    fn rpt_create_new_output_directory_root_with_code_512() {
+        let error = create_new_output_directory(Path::new("/")).unwrap_err();
+        assert_eq!(error, HeatmapError::RptOutputPathHasNoParent);
+        assert_eq!(error.code(), 512);
+    }
+
+    /// First create succeeds (parent created too); preflight then refuses
+    /// (510); a second create is refused atomically (513).
+    #[test]
+    fn rpt_create_new_output_directory_twice_with_code_513() {
+        let run_directory = unique_temp_path("create_twice");
+        let analysis_directory = run_directory.join("analysis_001_test");
+        create_new_output_directory(&analysis_directory).unwrap();
+        assert!(analysis_directory.is_dir());
+
+        assert_eq!(
+            check_output_path_is_new(&analysis_directory).unwrap_err(),
+            HeatmapError::RptOutputPathAlreadyExists
+        );
+        let error = create_new_output_directory(&analysis_directory).unwrap_err();
+        assert_eq!(error, HeatmapError::RptOutputDirectoryAppearedDuringRun);
+        assert_eq!(error.code(), 513);
+
+        fs::remove_dir(&analysis_directory).unwrap();
+        fs::remove_dir(&run_directory).unwrap();
+    }
+
+    /// Report files are create-new: a second write is refused (515) and the
+    /// first file's content is unchanged.
+    #[test]
+    fn rpt_write_bytes_to_new_file_existing_with_code_515() {
+        let directory = unique_temp_path("no_overwrite");
+        fs::create_dir(&directory).unwrap();
+        let report_path = directory.join(REPORT_FILE_NAME);
+
+        write_bytes_to_new_file(&report_path, b"first").unwrap();
+        let error = write_bytes_to_new_file(&report_path, b"second").unwrap_err();
+        assert_eq!(error, HeatmapError::RptOpenAlreadyExists);
+        assert_eq!(error.code(), 515);
+        assert!(!error.is_retryable()); // fails fast, no backoff sleeps
+        assert_eq!(fs::read(&report_path).unwrap(), b"first".to_vec());
+
+        fs::remove_file(&report_path).unwrap();
+        fs::remove_dir(&directory).unwrap();
+    }
+
+    /// The usage text states the never-overwrite rule (kept in step with behavior).
+    #[test]
+    fn guard_usage_text_states_out_dir_must_be_new() {
+        assert!(USAGE_TEXT.contains("must not exist yet"));
+    }
+
+    /// Listing vs counters: a counted skip with no listed entry returns 408;
+    /// a matching listing passes.
+    #[test]
+    fn ana_check_loop_scan_totals_file_notes_mismatch_with_code_408() {
+        let statistics = LoopScanStatistics {
+            files_total: 1,
+            files_skipped_not_found: 1,
+            ..LoopScanStatistics::default()
+        };
+        let error = check_loop_scan_totals(&statistics, &LoopScanFileNotes::default()).unwrap_err();
+        assert_eq!(error, HeatmapError::AnaLoopScanFileNotesMismatch);
+        assert_eq!(error.code(), 408);
+
+        let matching_notes = LoopScanFileNotes {
+            skipped_files: vec![SkippedFileNote {
+                source_file_index: 0,
+                reason: FileSkipReason::NotFound,
+                error_code: HeatmapError::SrcOpenNotFound.code(),
+            }],
+            partly_scanned_files: Vec::new(),
+        };
+        assert!(check_loop_scan_totals(&statistics, &matching_notes).is_ok());
+    }
+
+    /// Skip classification: every scan error maps to its counter reason;
+    /// unclassified codes fall back to "other error".
+    #[test]
+    fn src_file_skip_reason_from_scan_error_maps_codes() {
+        assert_eq!(
+            FileSkipReason::from_scan_error(HeatmapError::TypePathNotAbsolute),
+            FileSkipReason::NonAbsolutePath
+        );
+        assert_eq!(
+            FileSkipReason::from_scan_error(HeatmapError::SrcOpenNotFound),
+            FileSkipReason::NotFound
+        );
+        assert_eq!(
+            FileSkipReason::from_scan_error(HeatmapError::SrcOpenPermissionDenied),
+            FileSkipReason::PermissionDenied
+        );
+        assert_eq!(
+            FileSkipReason::from_scan_error(HeatmapError::SrcLineExceedsSkipCap),
+            FileSkipReason::LineExceedsSkipCap
+        );
+        assert_eq!(
+            FileSkipReason::from_scan_error(HeatmapError::SrcTooManyLines),
+            FileSkipReason::TooManyLines
+        );
+        assert_eq!(
+            FileSkipReason::from_scan_error(HeatmapError::SrcReadFailed),
+            FileSkipReason::OtherError
+        );
+    }
+
+    /// Cold file: counted only. Relative path and missing file: counted AND
+    /// listed, sorted by reason, with their exact codes. Totals checks pass.
+    #[test]
+    fn src_scan_all_files_for_loops_lists_skipped_files_with_reasons() {
+        let records = parse_lcov_text(
+            "SF:/abs/hix_test_cold.rs\nDA:1,0\nend_of_record\n\
+                 SF:relative/hix_test.rs\nDA:1,5\nend_of_record\n\
+                 SF:/nonexistent_hix_test_dir/missing.rs\nDA:1,5\nend_of_record\n",
+        );
+        let (loop_sites, statistics, file_notes) = scan_all_files_for_loops(&records);
+        assert!(loop_sites.is_empty());
+        assert_eq!(statistics.files_total, 3);
+        assert_eq!(statistics.files_skipped_cold, 1);
+        assert_eq!(statistics.files_skipped_non_absolute_path, 1);
+        assert_eq!(statistics.files_skipped_not_found, 1);
+
+        assert_eq!(file_notes.skipped_files.len(), 2); // cold file not listed
+        assert_eq!(
+            file_notes.skipped_files[0].reason,
+            FileSkipReason::NonAbsolutePath
+        );
+        assert_eq!(file_notes.skipped_files[0].source_file_index, 1);
+        assert_eq!(file_notes.skipped_files[0].error_code, 154);
+        assert_eq!(file_notes.skipped_files[1].reason, FileSkipReason::NotFound);
+        assert_eq!(file_notes.skipped_files[1].source_file_index, 2);
+        assert_eq!(file_notes.skipped_files[1].error_code, 301);
+        assert!(check_loop_scan_totals(&statistics, &file_notes).is_ok());
+    }
+
+    /// A real (temp) source file with one over-long line is scanned and
+    /// listed as partly scanned with its over-long-line count.
+    #[test]
+    fn src_scan_all_files_for_loops_lists_partly_scanned_file() {
+        let directory = unique_temp_path("partly_scanned");
+        fs::create_dir(&directory).unwrap();
+        let source_path = directory.join("gen.rs");
+        let source_text = format!(
+            "fn fill() {{\n    const T: [u8; 1] = [{}];\n    for x in items {{\n    }}\n}}\n",
+            "1,".repeat(35 * 1024)
+        );
+        fs::write(&source_path, source_text).unwrap();
+
+        let lcov_text = format!(
+            "SF:{}\nFN:1,_ZN3gen4fill17h0E\nFNDA:5,_ZN3gen4fill17h0E\nDA:1,5\nDA:3,500\nend_of_record\n",
+            source_path.display()
+        );
+        let records = parse_lcov_text(&lcov_text);
+        let (loop_sites, statistics, file_notes) = scan_all_files_for_loops(&records);
+        assert_eq!(loop_sites.len(), 1);
+        assert_eq!(statistics.files_scanned, 1);
+        assert_eq!(statistics.files_with_overlong_source_lines, 1);
+        assert!(file_notes.skipped_files.is_empty());
+        assert_eq!(file_notes.partly_scanned_files.len(), 1);
+        assert_eq!(file_notes.partly_scanned_files[0].overlong_line_count, 1);
+        assert!(check_loop_scan_totals(&statistics, &file_notes).is_ok());
+
+        fs::remove_file(&source_path).unwrap();
+        fs::remove_dir(&directory).unwrap();
+    }
+
+    /// Report listing: full totals shown, rows capped at Top-N.
+    #[test]
+    fn rpt_write_loop_scan_file_notes_caps_rows_at_top_n() {
+        let records = parse_sample();
+        let skipped_note = SkippedFileNote {
+            source_file_index: 0,
+            reason: FileSkipReason::NotFound,
+            error_code: HeatmapError::SrcOpenNotFound.code(),
+        };
+        let partly_note = PartlyScannedFileNote {
+            source_file_index: 0,
+            overlong_line_count: 75,
+        };
+        let file_notes = LoopScanFileNotes {
+            skipped_files: vec![skipped_note; 12],
+            partly_scanned_files: vec![partly_note; 3],
+        };
+        let report_text = render_text_report_with_notes(&records, &[], &[], &file_notes, 10);
+        assert!(report_text.contains("[loop-scan file notes]"));
+        assert!(report_text.contains("their loops are missing): 12   (showing up to 10)"));
+        assert_eq!(report_text.matches("code 301").count(), 10);
+        assert!(report_text.contains("rest skipped): 3   (showing up to 10)"));
+        assert_eq!(report_text.matches("75 over-long lines").count(), 3);
+    }
+
+    /// Converts string arguments to `OsString` arguments.
+    fn os_arguments(arguments: &[&str]) -> Vec<OsString> {
+        arguments
+            .iter()
+            .map(|argument| OsString::from(*argument))
+            .collect()
+    }
+
+    /// All seven flags (any order) produce a configuration with run metadata.
+    #[test]
+    fn cli_parse_cli_arguments_accepts_all_seven_flags() {
+        let configuration = parse_cli_arguments(
+            os_arguments(&[
+                "hix",
+                "--work-unit-name",
+                "chunks_generated",
+                "--lcov",
+                "/abs/in.lcov",
+                "--run-duration-secs",
+                "300",
+                "--out-dir",
+                "/abs/out",
+                "--work-units",
+                "1200",
+                "--top-n",
+                "5",
+                "--run-label",
+                "run_005_pumpkin",
+            ])
+            .into_iter(),
+        )
+        .unwrap();
+        let run_metadata = &configuration.run_metadata;
+        assert_eq!(
+            run_metadata.run_label.as_ref().unwrap().get().unwrap(),
+            "run_005_pumpkin"
+        );
+        assert_eq!(run_metadata.run_duration.unwrap().get().unwrap(), 300);
+        let work_units = run_metadata.work_units.as_ref().unwrap();
+        assert_eq!(work_units.count.get().unwrap(), 1200);
+        assert_eq!(work_units.name.get().unwrap(), "chunks_generated");
+    }
+
+    /// Without metadata flags, metadata is empty (all optional).
+    #[test]
+    fn cli_parse_cli_arguments_metadata_absent_is_default() {
+        let configuration = parse_cli_arguments(
+            os_arguments(&["hix", "--lcov", "/abs/in.lcov", "--out-dir", "/abs/out"]).into_iter(),
+        )
+        .unwrap();
+        assert_eq!(configuration.run_metadata, RunMetadata::default());
+    }
+
+    #[test]
+    fn cli_parse_cli_arguments_run_duration_not_a_number_with_code_111() {
+        let error = cli_error(&[
+            "hix",
+            "--lcov",
+            "/abs/in.lcov",
+            "--out-dir",
+            "/abs/out",
+            "--run-duration-secs",
+            "five",
+        ])
+        .unwrap();
+        assert_eq!(error, HeatmapError::CliRunDurationNotANumber);
+        assert_eq!(error.code(), 111);
+    }
+
+    #[test]
+    fn cli_parse_cli_arguments_work_units_without_name_with_code_115() {
+        let error = cli_error(&[
+            "hix",
+            "--lcov",
+            "/abs/in.lcov",
+            "--out-dir",
+            "/abs/out",
+            "--work-units",
+            "10",
+        ])
+        .unwrap();
+        assert_eq!(error, HeatmapError::CliWorkUnitsWithoutName);
+        assert_eq!(error.code(), 115);
+    }
+
+    #[test]
+    fn cli_parse_cli_arguments_work_unit_name_without_units_with_code_116() {
+        let error = cli_error(&[
+            "hix",
+            "--lcov",
+            "/abs/in.lcov",
+            "--out-dir",
+            "/abs/out",
+            "--work-unit-name",
+            "ticks",
+        ])
+        .unwrap();
+        assert_eq!(error, HeatmapError::CliWorkUnitNameWithoutUnits);
+        assert_eq!(error.code(), 116);
+    }
+
+    #[test]
+    fn type_run_label_new_invalid_with_code_156() {
+        for bad_label in ["", "run 005", "run/005", "run\t005"] {
+            let error = RunLabel::new(bad_label).unwrap_err();
+            assert_eq!(error, HeatmapError::TypeRunLabelInvalid);
+            assert_eq!(error.code(), 156);
+        }
+        let too_long = "x".repeat(MAX_RUN_LABEL_BYTES + 1);
+        assert_eq!(
+            RunLabel::new(&too_long).unwrap_err(),
+            HeatmapError::TypeRunLabelInvalid
+        );
+        assert_eq!(
+            RunLabel::new("run_005_pumpkin.v2-a")
+                .unwrap()
+                .get()
+                .unwrap(),
+            "run_005_pumpkin.v2-a"
+        );
+    }
+
+    #[test]
+    fn type_run_label_get_corrupted_with_code_157() {
+        let corrupted = RunLabel {
+            run_label_text: String::from("bad label"),
+        };
+        let error = corrupted.get().unwrap_err();
+        assert_eq!(error, HeatmapError::TypeRunLabelCorrupted);
+        assert_eq!(error.code(), 157);
+    }
+
+    #[test]
+    fn type_run_duration_seconds_new_out_of_range_with_code_158() {
+        let error = RunDurationSeconds::new(0).unwrap_err();
+        assert_eq!(error, HeatmapError::TypeRunDurationOutOfRange);
+        assert_eq!(error.code(), 158);
+        assert_eq!(
+            RunDurationSeconds::new(MAX_RUN_DURATION_SECS + 1).unwrap_err(),
+            HeatmapError::TypeRunDurationOutOfRange
+        );
+        assert_eq!(RunDurationSeconds::new(300).unwrap().get().unwrap(), 300);
+    }
+
+    #[test]
+    fn type_run_duration_seconds_get_corrupted_with_code_159() {
+        let corrupted = RunDurationSeconds {
+            duration_seconds: 0,
+        };
+        let error = corrupted.get().unwrap_err();
+        assert_eq!(error, HeatmapError::TypeRunDurationCorrupted);
+        assert_eq!(error.code(), 159);
+    }
+
+    #[test]
+    fn type_work_unit_count_new_out_of_range_with_code_160() {
+        let error = WorkUnitCount::new(0).unwrap_err();
+        assert_eq!(error, HeatmapError::TypeWorkUnitsOutOfRange);
+        assert_eq!(error.code(), 160);
+        assert_eq!(
+            WorkUnitCount::new(MAX_WORK_UNITS + 1).unwrap_err(),
+            HeatmapError::TypeWorkUnitsOutOfRange
+        );
+    }
+
+    #[test]
+    fn type_work_unit_count_get_corrupted_with_code_161() {
+        let corrupted = WorkUnitCount { work_unit_count: 0 };
+        let error = corrupted.get().unwrap_err();
+        assert_eq!(error, HeatmapError::TypeWorkUnitsCorrupted);
+        assert_eq!(error.code(), 161);
+    }
+
+    #[test]
+    fn type_work_unit_name_new_invalid_with_code_162() {
+        let error = WorkUnitName::new("chunks generated").unwrap_err();
+        assert_eq!(error, HeatmapError::TypeWorkUnitNameInvalid);
+        assert_eq!(error.code(), 162);
+        let too_long = "x".repeat(MAX_WORK_UNIT_NAME_BYTES + 1);
+        assert_eq!(
+            WorkUnitName::new(&too_long).unwrap_err(),
+            HeatmapError::TypeWorkUnitNameInvalid
+        );
+    }
+
+    #[test]
+    fn type_work_unit_name_get_corrupted_with_code_163() {
+        let corrupted = WorkUnitName {
+            work_unit_name_text: String::from("bad\tname"),
+        };
+        let error = corrupted.get().unwrap_err();
+        assert_eq!(error, HeatmapError::TypeWorkUnitNameCorrupted);
+        assert_eq!(error.code(), 163);
+    }
+
+    /// With all metadata: provenance lines, per-minute figure, and the
+    /// appended TSV column (header + 11 fields per row, value = count / units).
+    #[test]
+    fn rpt_run_metadata_in_provenance_and_tsv_column() {
+        let records = parse_sample();
+        let function_sites = vec![make_site(2400, 1)];
+        let run_metadata = RunMetadata {
+            run_label: Some(RunLabel::new("run_005_pumpkin").unwrap()),
+            run_duration: Some(RunDurationSeconds::new(300).unwrap()),
+            work_units: Some(WorkUnits {
+                count: WorkUnitCount::new(1200).unwrap(),
+                name: WorkUnitName::new("chunks_generated").unwrap(),
+            }),
+        };
+        let (report_text, tsv_text) = render_reports(
+            &records,
+            &function_sites,
+            &[],
+            &LoopScanFileNotes::default(),
+            &run_metadata,
+            10,
+        );
+        assert!(report_text.contains("run label               : run_005_pumpkin"));
+        assert!(report_text.contains("run duration            : 300 s (5.00 min)"));
+        assert!(report_text.contains("work units              : 1200 chunks_generated"));
+        assert!(report_text.contains("work units per minute   : 240.00 chunks_generated/min"));
+
+        let mut tsv_lines = tsv_text.lines();
+        assert!(tsv_lines.next().unwrap().ends_with("\tcount_per_work_unit"));
+        let data_row = tsv_lines.next().unwrap();
+        assert_eq!(data_row.split('\t').count(), 11);
+        assert!(data_row.ends_with("\t2.000000")); // 2400 / 1200
+    }
+
+    /// Without metadata: "(not given)" lines, and the TSV keeps 10 columns.
+    #[test]
+    fn rpt_run_metadata_absent_prints_not_given_and_no_tsv_column() {
+        let records = parse_sample();
+        let function_sites = vec![make_site(2400, 1)];
+        let (report_text, tsv_text) = render_reports(
+            &records,
+            &function_sites,
+            &[],
+            &LoopScanFileNotes::default(),
+            &RunMetadata::default(),
+            10,
+        );
+        assert!(report_text.contains("run label               : (not given)"));
+        assert!(report_text.contains("run duration            : (not given)"));
+        assert!(report_text.contains("work units              : (not given)"));
+        assert!(report_text.contains("work units per minute   : n/a"));
+        let mut tsv_lines = tsv_text.lines();
+        assert!(tsv_lines.next().unwrap().ends_with("\tper_enclosing_call"));
+        assert_eq!(tsv_lines.next().unwrap().split('\t').count(), 10);
+    }
+
+    /// `USAGE_TEXT` is static, so it cannot read the metadata constants;
+    /// this keeps it in step with them.
+    #[test]
+    fn guard_usage_text_matches_run_metadata_constants() {
+        assert!(USAGE_TEXT.contains(&format!("(1..{})", MAX_RUN_DURATION_SECS)));
+        assert!(USAGE_TEXT.contains(&format!("(1..{})", MAX_WORK_UNITS)));
+        assert!(USAGE_TEXT.contains(&format!("1-{} characters", MAX_RUN_LABEL_BYTES)));
+        assert!(USAGE_TEXT.contains(&format!("unit name: 1-{}", MAX_WORK_UNIT_NAME_BYTES)));
+    }
+
+    /// Builds sites hottest-first from counts (lines 1, 2, ...) and their summary.
+    fn sorted_sites_and_summary(counts: &[u64]) -> (Vec<HeatSite>, HeatKindSummary) {
+        let mut sites: Vec<HeatSite> = counts
+            .iter()
+            .enumerate()
+            .map(|(index, count)| make_site(*count, (index as u32) + 1))
+            .collect();
+        let summary = sort_and_summarize_sites(&mut sites).unwrap();
+        (sites, summary)
+    }
+
+    /// Gini by hand: counts [3, 1] -> sum(i * x_i) = 1*1 + 2*3 = 7,
+    /// G = 2*7 / (2*4) - 3/2 = 0.25.
+    #[test]
+    fn ana_compute_distribution_shape_gini_known_value() {
+        let (sites, summary) = sorted_sites_and_summary(&[3, 1]);
+        let shape = compute_distribution_shape(&sites, &summary).unwrap();
+        assert!((shape.gini_all_sites.unwrap() - 0.25).abs() < 1e-12);
+        assert!((shape.gini_counted_sites.unwrap() - 0.25).abs() < 1e-12);
+    }
+
+    /// Equal counts: Gini 0, shares by site count, no gap, no drop.
+    #[test]
+    fn ana_compute_distribution_shape_equal_counts() {
+        let (sites, summary) = sorted_sites_and_summary(&[5, 5, 5, 5]);
+        let shape = compute_distribution_shape(&sites, &summary).unwrap();
+        assert!(shape.gini_all_sites.unwrap().abs() < 1e-12);
+        assert!((shape.top_narrow_share_percent.unwrap() - 25.0).abs() < 1e-9);
+        assert!((shape.top_wide_share_percent.unwrap() - 100.0).abs() < 1e-9);
+        assert!(shape.largest_empty_decade_gap.is_none());
+        assert!(shape.largest_head_drop.is_none());
+    }
+
+    /// One counted site among zeros: Gini over all sites (n-1)/n = 0.75;
+    /// over counted sites 0.0 (a single site is perfectly "equal").
+    #[test]
+    fn ana_compute_distribution_shape_one_hot_site_among_zeros() {
+        let (sites, summary) = sorted_sites_and_summary(&[0, 100, 0, 0]);
+        let shape = compute_distribution_shape(&sites, &summary).unwrap();
+        assert!((shape.gini_all_sites.unwrap() - 0.75).abs() < 1e-12);
+        assert!(shape.gini_counted_sites.unwrap().abs() < 1e-12);
+        assert!((shape.top_narrow_share_percent.unwrap() - 100.0).abs() < 1e-9);
+    }
+
+    /// Counts 5_000_000 (bucket 7) and 3 (bucket 1): buckets 2..=6 are empty,
+    /// a gap of 5 decades: no sites in [1e1, 1e6).
+    #[test]
+    fn ana_find_largest_empty_decade_gap_detects_gap() {
+        let (_sites, summary) = sorted_sites_and_summary(&[5_000_000, 3]);
+        let gap = find_largest_empty_decade_gap(&summary.decade_histogram).unwrap();
+        assert_eq!(
+            gap,
+            EmptyDecadeGap {
+                empty_decade_count: 5,
+                lower_bucket_index: 1,
+                upper_bucket_index: 7,
+            }
+        );
+    }
+
+    /// Head = sites carrying 99% of counts (all 3 here). Ratios 10x and 2x:
+    /// the largest drop is rank 1 -> 2, 10x.
+    #[test]
+    fn ana_find_largest_head_drop_picks_largest_ratio() {
+        let (sites, summary) = sorted_sites_and_summary(&[1000, 100, 50]);
+        assert_eq!(summary.sites_reaching_percent[2], 3);
+        let drop = find_largest_head_drop(&sites, 3).unwrap();
+        assert_eq!(drop.higher_position, 0);
+        assert!((drop.drop_ratio - 10.0).abs() < 1e-12);
+    }
+
+    /// Unsorted input is rejected (sites built directly, bypassing the sort).
+    #[test]
+    fn ana_compute_distribution_shape_unsorted_with_code_409() {
+        let sites = vec![make_site(1, 1), make_site(9, 2)];
+        let summary = summarize_sorted_sites(&sites).unwrap();
+        let error = compute_distribution_shape(&sites, &summary).unwrap_err();
+        assert_eq!(error, HeatmapError::AnaShapeInputNotSorted);
+        assert_eq!(error.code(), 409);
+    }
+
+    /// Report: section, legend, and figures present; an empty kind prints n/a.
+    #[test]
+    fn rpt_write_distribution_shape_section_renders() {
+        let records = parse_sample();
+        let (function_sites, _summary) = sorted_sites_and_summary(&[1000, 100, 50]);
+        let report_text = render_text_report(&records, &function_sites, &[]);
+        assert!(report_text.contains("[DISTRIBUTION SHAPE]  (experimental"));
+        assert!(report_text.contains("gini, all sites"));
+        assert!(report_text.contains("top-10 share"));
+        assert!(report_text.contains("largest drop within 99% head"));
+        assert!(report_text.contains("10.0000x  rank 1 -> 2  (count 1000 -> 100)"));
+        assert!(report_text.contains("  LOOPS\n    n/a (total count is 0)"));
     }
 }
