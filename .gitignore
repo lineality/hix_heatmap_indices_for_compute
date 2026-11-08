@@ -9,7 +9,7 @@ data
 logs
 world
 modeling*
-config*
+config_files/
 
 nethernet-key*
 pumpkin*
