@@ -116,12 +116,13 @@
 //! capped by the `MAX_*` constants. The error path never allocates.
 //!
 //! ## Config files
-//! A config file (`config_files/hix_<scenario>.toml`, kept next to
-//! `modeling_data/`) holds what is needed to repeat a run: the target crate
-//! and binary, the `modeling_data` folder, the scenario name, and analysis
-//! options. It is written create-new (never overwritten), then read back and
-//! compared before it is used. It is read with the no-heap field-reader
-//! described below. Keys and reading rules: see the "HIX config files" section.
+//! A config file (`config_files/hixtoml_<scenario>.toml`, kept next to
+//! `modeling_data/` in the directory HIX is run from) holds what is needed
+//! to repeat a run: the target crate and binary, the `modeling_data` folder,
+//! the scenario name, and analysis options. It is written create-new (never
+//! overwritten), then read back and compared before it is used. It is read
+//! with the no-heap field reader described below. Keys, layout, and reading
+//! rules: see the "HIX config files" section.
 //!
 //! # Config File TOML Reading:
 //! ### From: read_toml_single_line_field_no_heap.rs
@@ -201,7 +202,8 @@
 //! unbuffered `File`, and tests give it in-memory input.
 //!
 //! ## RSLF Error codes
-//! Codes 801-816 are used; 817-849 are reserved for the matching config
+//! Codes 801-816 are used (TOML-Reader);
+//! In HIX, 817–849 are the config-file codes. The table is in the HeatmapError doc comment.
 //! writer. Numbers range from 800-849 so that they may often be kept
 //! unchanged when this module is merged into a parent project in development.
 //! The table is in the `HeatmapError` doc comment.
@@ -233,7 +235,6 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ============================================================================
@@ -347,6 +348,7 @@ const ERROR_LOG_FILE_NAME: &str = "hix_error_log.txt";
 pub const USAGE_TEXT: &str = "\
 usage: hix --lcov /ABSOLUTE/path/file.lcov --out-dir /ABSOLUTE/output/dir [--top-n 1..10000]
            [--run-label LABEL] [--run-duration-secs N] [--work-units N --work-unit-name NAME]
+       hix --wizard   guided setup: tool checks, config file, planned run (interactive)
 
   --lcov               LCOV file from: cargo llvm-cov report --lcov --output-path /ABSOLUTE/file.lcov
   --out-dir            NEW directory for hix_report.txt and hix_sites.tsv; must not exist yet
@@ -381,8 +383,9 @@ const CO_COUNT_MIN_COUNT: u64 = 100_000;
 /// | 400–499 | analysis / aggregation                          |
 /// | 500–599 | report output                                   |
 /// | 600–699 | error log                                       |
-/// | 700–799 |                                                 |
-/// | 800–849 | config files (read; 817–849 reserved for write) |
+/// | 700–799 | wizard and config replay                        |
+/// | 801–816 | TOML field reader                               |
+/// | 817–849 | Config file handling                            |
 // `Debug` (variant names as text) exists only in test and debug builds, so a
 // production-release binary contains no variant-name strings, and any stray
 // `{:?}` on a HeatmapError in production-release code fails to compile.
@@ -499,10 +502,39 @@ pub enum HeatmapError {
     LogWriteFailed = 604,
     LogClockBeforeEpoch = 605,
 
-    // 700–799: ...
+    // 700–799: wizard and config replay
+    WizRunningAsRoot = 701,
+    WizRunningUnderSudo = 702,
+    WizProcStatusUnreadable = 703,
+    WizProcStatusMalformed = 704,
+    WizRequiredToolMissing = 705,
+    WizInputEnded = 706,
+    WizInputReadFailed = 707,
+    WizOutputWriteFailed = 708,
+    WizCurrentDirectoryUnavailable = 709,
+    WizUserDeclinedDirectoryCreation = 710,
+    WizDirectoryCreateFailed = 711,
+    WizModelingDataListFailed = 712,
+    WizTooManyModelingDataEntries = 713,
+    WizRunNumberExhausted = 714,
+    WizTooManyConfigDirectoryEntries = 715,
+    WizPerfParanoidUnreadable = 716,
+    WizPerfParanoidMalformed = 717,
+    WizAnswerTooLong = 718,
+    WizAnswerNotUtf8 = 719,
+    WizPathNotADirectory = 720,
+    WizDirectoryCheckFailed = 721,
+    WizBaseEntryNotADirectory = 722,
+    WizConfigListFailed = 723,
+    WizModelingDataEntryFailed = 724,
+    WizConfigEntryFailed = 725,
+    WizCrateHasNoCargoToml = 726,
+    WizConfigChoiceInvalid = 727,
+    WizUserDeclinedConfigWrite = 728,
+    WizScenarioConfigExists = 729,
 
     // 800-849: TOML/Config file read/write
-    // 800-816: for toml/config writer reader
+    // 801-816: TOML field reader (RSLF)
     // Functionality: Read Single Line Field = RSLF
     RSLFEmptyKey = 801,
     RSLFOutputBufferZeroSized = 802,
@@ -523,7 +555,7 @@ pub enum HeatmapError {
 
     // 817–849: HIX config files (values, write, read-back, load)
     CfgPathNotAbsolute = 817,
-    CfgPathValueInvalid = 818,
+    CfgPathValueNotStorable = 818,
     CfgPathValueCorrupted = 819,
     CfgRenderBufferFull = 820,
     CfgWriteOpenNotFound = 821,
@@ -538,10 +570,12 @@ pub enum HeatmapError {
     CfgValueNotUtf8 = 830,
     CfgVersionNotANumber = 831,
     CfgUnsupportedVersion = 832,
-    CfgTopNInvalid = 833,
+    CfgTopNNotANumber = 833,
     CfgBooleanInvalid = 834,
     CfgWorkUnitNameInvalid = 835,
     CfgRenderedRangeInvalid = 836,
+    CfgPathValueNotUtf8 = 837,
+    CfgTopNOutOfRange = 838,
 }
 
 impl HeatmapError {
@@ -667,7 +701,7 @@ impl HeatmapError {
             | HeatmapError::TypeAnalysisPurposeInvalid
             | HeatmapError::TypeAnalysisPurposeCorrupted
             | HeatmapError::CfgPathNotAbsolute
-            | HeatmapError::CfgPathValueInvalid
+            | HeatmapError::CfgPathValueNotStorable
             | HeatmapError::CfgPathValueCorrupted
             | HeatmapError::CfgRenderBufferFull
             | HeatmapError::CfgWriteOpenNotFound
@@ -681,10 +715,41 @@ impl HeatmapError {
             | HeatmapError::CfgValueNotUtf8
             | HeatmapError::CfgVersionNotANumber
             | HeatmapError::CfgUnsupportedVersion
-            | HeatmapError::CfgTopNInvalid
+            | HeatmapError::CfgTopNNotANumber
             | HeatmapError::CfgBooleanInvalid
             | HeatmapError::CfgWorkUnitNameInvalid
-            | HeatmapError::CfgRenderedRangeInvalid => false,
+            | HeatmapError::CfgPathValueNotUtf8
+            | HeatmapError::CfgTopNOutOfRange
+            | HeatmapError::CfgRenderedRangeInvalid
+            | HeatmapError::WizRunningAsRoot
+            | HeatmapError::WizRunningUnderSudo
+            | HeatmapError::WizProcStatusUnreadable
+            | HeatmapError::WizProcStatusMalformed
+            | HeatmapError::WizRequiredToolMissing
+            | HeatmapError::WizInputEnded
+            | HeatmapError::WizInputReadFailed
+            | HeatmapError::WizOutputWriteFailed
+            | HeatmapError::WizCurrentDirectoryUnavailable
+            | HeatmapError::WizUserDeclinedDirectoryCreation
+            | HeatmapError::WizDirectoryCreateFailed
+            | HeatmapError::WizModelingDataListFailed
+            | HeatmapError::WizTooManyModelingDataEntries
+            | HeatmapError::WizRunNumberExhausted
+            | HeatmapError::WizTooManyConfigDirectoryEntries
+            | HeatmapError::WizPerfParanoidUnreadable
+            | HeatmapError::WizPerfParanoidMalformed
+            | HeatmapError::WizAnswerTooLong
+            | HeatmapError::WizAnswerNotUtf8
+            | HeatmapError::WizPathNotADirectory
+            | HeatmapError::WizDirectoryCheckFailed
+            | HeatmapError::WizBaseEntryNotADirectory
+            | HeatmapError::WizConfigListFailed
+            | HeatmapError::WizModelingDataEntryFailed
+            | HeatmapError::WizConfigEntryFailed
+            | HeatmapError::WizCrateHasNoCargoToml
+            | HeatmapError::WizConfigChoiceInvalid
+            | HeatmapError::WizUserDeclinedConfigWrite
+            | HeatmapError::WizScenarioConfigExists => false,
         }
     }
 
@@ -887,12 +952,6 @@ impl std::fmt::Display for HeatmapError {
                 "analysis purpose must be 1..=MAX_ANALYSIS_PURPOSE_BYTES of A-Z a-z 0-9 _ - ."
             }
             HeatmapError::TypeAnalysisPurposeCorrupted => "AnalysisPurpose failed validity recheck",
-            HeatmapError::CfgPathNotAbsolute => "config path value is not absolute",
-            HeatmapError::CfgPathValueInvalid => {
-                "config path value is empty, not UTF-8, longer than MAX_CONFIG_PATH_BYTES, \
-                             or contains a double quote, backslash, or control character"
-            }
-            HeatmapError::CfgPathValueCorrupted => "ConfigPath failed validity recheck",
             HeatmapError::CfgRenderBufferFull => {
                 "config text does not fit in CONFIG_FILE_MAX_BYTES (internal invariant)"
             }
@@ -920,13 +979,69 @@ impl std::fmt::Display for HeatmapError {
             HeatmapError::CfgUnsupportedVersion => {
                 "hix_config_version is not CONFIG_FORMAT_VERSION of this HIX"
             }
-            HeatmapError::CfgTopNInvalid => "config top_n is not a number in 1..=MAX_TOP_N",
             HeatmapError::CfgBooleanInvalid => "config boolean value is not true or false",
             HeatmapError::CfgWorkUnitNameInvalid => {
                 "config work_unit_name must be 1..=MAX_WORK_UNIT_NAME_BYTES of A-Z a-z 0-9 _ - ."
             }
             HeatmapError::CfgRenderedRangeInvalid => {
                 "rendered config length is outside its buffer (internal invariant)"
+            }
+            HeatmapError::CfgPathNotAbsolute => "config field path is not absolute",
+            HeatmapError::CfgPathValueNotStorable => {
+                "config field path is empty, longer than MAX_CONFIG_PATH_BYTES, or contains a double quote, backslash, or control byte"
+            }
+            HeatmapError::CfgPathValueCorrupted => "ConfigFieldPath failed validity recheck",
+            HeatmapError::CfgTopNNotANumber => "config top_n is not a u16 number",
+            HeatmapError::CfgPathValueNotUtf8 => {
+                "config field path is not valid UTF-8 (a config file is text)"
+            }
+            HeatmapError::CfgTopNOutOfRange => "config top_n is outside 1..=MAX_TOP_N",
+            HeatmapError::WizRunningAsRoot => "wizard refuses to run as root (effective uid 0)",
+            HeatmapError::WizRunningUnderSudo => {
+                "wizard refuses to run under sudo (SUDO_UID or SUDO_USER is set)"
+            }
+            HeatmapError::WizProcStatusUnreadable => "could not read /proc/self/status",
+            HeatmapError::WizProcStatusMalformed => {
+                "/proc/self/status has no readable effective uid"
+            }
+            HeatmapError::WizRequiredToolMissing => {
+                "a required tool is missing (see the tool list)"
+            }
+            HeatmapError::WizInputEnded => "wizard input ended (end of input) before an answer",
+            HeatmapError::WizInputReadFailed => "reading a wizard answer failed",
+            HeatmapError::WizOutputWriteFailed => "writing wizard output failed",
+            HeatmapError::WizCurrentDirectoryUnavailable => "current directory unavailable",
+            HeatmapError::WizUserDeclinedDirectoryCreation => {
+                "user declined to create the missing directories; stopped"
+            }
+            HeatmapError::WizDirectoryCreateFailed => "creating a wizard directory failed",
+            HeatmapError::WizModelingDataListFailed => "could not list the modeling_data directory",
+            HeatmapError::WizTooManyModelingDataEntries => {
+                "modeling_data has more than MAX_MODELING_DATA_ENTRIES entries"
+            }
+            HeatmapError::WizRunNumberExhausted => "next run number would exceed MAX_RUN_NUMBER",
+            HeatmapError::WizTooManyConfigDirectoryEntries => {
+                "config_files has more than MAX_CONFIG_DIRECTORY_ENTRIES entries"
+            }
+            HeatmapError::WizPerfParanoidUnreadable => "could not read perf_event_paranoid",
+            HeatmapError::WizPerfParanoidMalformed => "perf_event_paranoid is not a number",
+            HeatmapError::WizAnswerTooLong => "wizard answer longer than MAX_WIZARD_ANSWER_BYTES",
+            HeatmapError::WizAnswerNotUtf8 => "wizard answer is not UTF-8",
+            HeatmapError::WizPathNotADirectory => "path is not an existing directory",
+            HeatmapError::WizDirectoryCheckFailed => "could not check whether a directory exists",
+            HeatmapError::WizBaseEntryNotADirectory => {
+                "modeling_data or config_files exists but is not a directory"
+            }
+            HeatmapError::WizConfigListFailed => "could not list the config_files directory",
+            HeatmapError::WizModelingDataEntryFailed => "reading a modeling_data entry failed",
+            HeatmapError::WizConfigEntryFailed => "reading a config_files entry failed",
+            HeatmapError::WizCrateHasNoCargoToml => "target crate directory has no Cargo.toml",
+            HeatmapError::WizConfigChoiceInvalid => "config choice is not a listed number or n",
+            HeatmapError::WizUserDeclinedConfigWrite => {
+                "user declined to write the config file; stopped"
+            }
+            HeatmapError::WizScenarioConfigExists => {
+                "a config file for this scenario name already exists"
             }
         };
         write!(formatter, "HIX-{}: {}", self.code(), description)
@@ -2130,12 +2245,48 @@ mod read_toml_single_line_field_no_heap_tests {
 // HIX config files (run configuration in the TOML subset)
 // ============================================================================
 //
-// A config file holds what is needed to repeat a run. It is written by the
-// wizard (create-new, never overwritten), then read back and compared, and
-// it is read by the wizard and by automated replay. Each field is read with
-// `read_single_line_field_from_toml_no_heap` (no heap).
+// Purpose
+//   A config file holds what is needed to repeat a run: the target crate and
+//   binary, the `modeling_data` folder, the scenario name, and analysis
+//   options. The wizard writes it once and reads it back to check it. The
+//   wizard (replay) and `hix --config` (automated replay) read it.
 //
-// File layout (exactly as written by `render_config_file_text`):
+// Extent of this section
+//   From this header to the closing brace of `load_config_file`:
+//   1. Constants: format version, sizes, file-name parts, keys.
+//   2. Value types: `ScenarioName`, `CargoBinaryName`, `AnalysisPurpose`,
+//      `ConfigFieldPath`. Any value that can be constructed can be written
+//      to a config file and read back unchanged.
+//   3. `HixConfig` (one config file) and `config_file_name_for_scenario`.
+//   4. Writing: `config_render_error`, `write_config_lines`,
+//      `render_config_file_text`, `write_new_config_file`.
+//   5. Reading: `read_config_value`, `check_config_format_version`, the
+//      `parse_config_*` functions, `load_config_file`.
+//   Used from elsewhere in this file: the RSLF field reader, `TopNCount`,
+//   `WorkUnitName`, `AbsolutePath`, `is_valid_metadata_text`,
+//   `OpenErrorCodes`, `FileOpenPurpose`, `open_file_with_retry`.
+//
+// Design rules
+//   - The reader defines the format. The writer is checked against the
+//     reader, never trusted: every written file is read back with
+//     `load_config_file` and compared with what was meant.
+//   - Render first, then touch disk: the whole file is formatted into a
+//     stack buffer before the file is created, so a formatting failure
+//     never leaves a file behind.
+//   - Never overwrite, never delete: files are created create-new. If the
+//     write, sync, or read-back fails after creation, the file stays and the
+//     returned code says not to use it.
+//   - Memory: config values are a few short `String`s (heap; small and
+//     bounded by the MAX_* constants). The render buffer and every read
+//     buffer are stack arrays. The field reader uses no heap.
+//
+// File name: `config_files/hixtoml_<scenario>.toml`, in the directory HIX is
+// run from, next to `modeling_data/`. The distinctive prefix lets the wizard
+// list config files without picking up other TOML files; any listed file is
+// still fully checked by `load_config_file`. One config per scenario name:
+// a second config with the same scenario name is refused (create-new).
+//
+// File layout (exactly as written by `write_config_lines`):
 //   # two comment lines
 //   hix_config_version = 1
 //   target_crate_path = "/ABSOLUTE/path/to/target/crate"
@@ -2148,15 +2299,17 @@ mod read_toml_single_line_field_no_heap_tests {
 //   demangle_outputs = true
 //
 // Reading rules (`load_config_file`):
-// - Each known key may appear at most once (816).
-// - `hix_config_version` must equal `CONFIG_FORMAT_VERSION` (831, 832).
-// - Every key except `work_unit_name` is required (811 if missing).
-// - Unknown keys are ignored: the field reader looks up known keys only.
-// - Numbers and booleans may have spaces around them; quoted values are
-//   taken exactly as written.
+//   - Each known key may appear at most once (816).
+//   - `hix_config_version` must equal `CONFIG_FORMAT_VERSION` (831, 832).
+//   - Every key except `work_unit_name` is required (811 if missing).
+//   - Unknown keys are ignored: only known keys are looked up.
+//   - Numbers and booleans may have spaces around them; quoted values are
+//     taken exactly as written.
 //
-// The work-unit COUNT is not stored here: it is a result of each run, entered
-// after the run, and belongs in that run's record.
+// The work-unit COUNT is not stored here: it is a result of each run,
+// entered after the run, and belongs in that run's record.
+//
+// Error codes: 164-169 (the three name types), 817-838 (config files).
 
 /// Format version written to and required from every config file.
 /// Raise it when a change to keys or their meaning would make an older HIX
@@ -2166,15 +2319,14 @@ const CONFIG_FORMAT_VERSION: u32 = 1;
 /// Longest path value accepted in a config file, in bytes.
 ///
 /// 4096 is the Linux `PATH_MAX`. If a longer path is ever needed, raise this
-/// constant; the config render buffer (`CONFIG_FILE_MAX_BYTES`) and the
-/// path-read buffer (this constant, as a const generic) follow it
-/// automatically. Both are stack arrays.
+/// constant; the render buffer (`CONFIG_FILE_MAX_BYTES`) and the path read
+/// buffer (this constant, used as a const generic) follow it automatically.
 const MAX_CONFIG_PATH_BYTES: usize = 4096;
 
 /// Stack buffer for rendering one config file: the two path values at their
-/// maximum length plus a fixed allowance for comments, keys, and the short
+/// maximum length, plus a fixed allowance for comments, keys, and the short
 /// fields. The test `cfg_write_new_config_file_longest_values_round_trip`
-/// renders a config with every field at its maximum length.
+/// writes a config with every field at its maximum length.
 const CONFIG_FILE_MAX_BYTES: usize = 2 * MAX_CONFIG_PATH_BYTES + 4096;
 
 /// Stack buffer for reading short config values (names, numbers, booleans).
@@ -2196,7 +2348,8 @@ const MAX_ANALYSIS_PURPOSE_BYTES: usize = 64;
 const _: () = assert!("run_9999_".len() + MAX_SCENARIO_NAME_BYTES <= MAX_RUN_LABEL_BYTES);
 
 // Compile-time guard: the short-value read buffer holds every short field at
-// its maximum, so an over-long hand-edited name reaches its own type's check.
+// its maximum, so an over-long hand-edited name reaches its own type's check
+// (with its own code) instead of the reader's generic 812.
 const _: () = assert!(
     CONFIG_SHORT_VALUE_BUFFER_BYTES >= MAX_SCENARIO_NAME_BYTES
         && CONFIG_SHORT_VALUE_BUFFER_BYTES >= MAX_CARGO_BINARY_NAME_BYTES
@@ -2204,8 +2357,8 @@ const _: () = assert!(
         && CONFIG_SHORT_VALUE_BUFFER_BYTES >= MAX_WORK_UNIT_NAME_BYTES
 );
 
-/// Config file names: `hix_<scenario>.toml`.
-const CONFIG_FILE_NAME_PREFIX: &str = "hix_";
+/// Config file names: `hixtoml_<scenario>.toml` (see the section comment).
+const CONFIG_FILE_NAME_PREFIX: &str = "hixtoml_";
 const CONFIG_FILE_NAME_SUFFIX: &str = ".toml";
 
 /// Config keys (the only place each key's text is written).
@@ -2247,101 +2400,54 @@ const CONFIG_WRITE_OPEN_ERROR_CODES: OpenErrorCodes = OpenErrorCodes {
 };
 
 // ----------------------------------------------------------------------------
-// Short names: one rule, one type per meaning, unique codes per kind
+// Name values (scenario, cargo binary, analysis purpose)
 // ----------------------------------------------------------------------------
+//
+// Three separate types, one per meaning, so a scenario name can never be
+// passed where a binary name is expected. All three use the run-label rule
+// `is_valid_metadata_text`: 1..=max bytes of `A-Z a-z 0-9 _ - .`. That makes
+// every name safe as part of a folder or file name (no `/`, no spaces), as a
+// quoted config value (no `"`, no `\`), and in the report and TSV (no tabs or
+// newlines). Each type has its own maximum, its own two codes, and its own
+// method prefix.
+//
+// Codes 164/166/168 (invalid) are returned both for wizard answers and for
+// values loaded from a config file; none of them is a command-line usage
+// error, so `main` never shows the usage text for them.
 
-/// Rules for one kind of short name used in config files and folder names.
+/// Scenario name, e.g. `pumpkin_world_spawn`: names the run folders
+/// (`run_NNN_<scenario>`) and the config file (`hixtoml_<scenario>.toml`).
 ///
-/// Every kind uses the run-label character rule (`is_valid_metadata_text`:
-/// 1..=max bytes of `A-Z a-z 0-9 _ - .`). So a name is safe as a quoted
-/// config value (no quotes or backslashes), in the report and TSV, and as
-/// part of a folder name. Kinds differ only in maximum length and in their
-/// error codes, which stay unique per kind so a code points at its field.
-pub trait NameTextKind {
-    /// Longest accepted name, in bytes (ASCII only, so also characters).
-    const MAX_BYTES: usize;
-    /// Returned by `NameText::new` for a name that breaks the rule (input validation).
-    const INVALID_CODE: HeatmapError;
-    /// Returned by `NameText::get` when a stored name fails its recheck (internal invariant).
-    const CORRUPTED_CODE: HeatmapError;
-    /// Field name, used only by debug-build diagnostics.
-    const FIELD_LABEL: &'static str;
-}
-
-/// Kind marker: scenario name (`run_NNN_<scenario>`, `hix_<scenario>.toml`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScenarioNameKind;
-
-impl NameTextKind for ScenarioNameKind {
-    const MAX_BYTES: usize = MAX_SCENARIO_NAME_BYTES;
-    const INVALID_CODE: HeatmapError = HeatmapError::TypeScenarioNameInvalid;
-    const CORRUPTED_CODE: HeatmapError = HeatmapError::TypeScenarioNameCorrupted;
-    const FIELD_LABEL: &'static str = "scenario name";
-}
-
-/// Kind marker: cargo binary name (`cargo llvm-cov run --bin <name>`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CargoBinaryNameKind;
-
-impl NameTextKind for CargoBinaryNameKind {
-    const MAX_BYTES: usize = MAX_CARGO_BINARY_NAME_BYTES;
-    const INVALID_CODE: HeatmapError = HeatmapError::TypeCargoBinaryNameInvalid;
-    const CORRUPTED_CODE: HeatmapError = HeatmapError::TypeCargoBinaryNameCorrupted;
-    const FIELD_LABEL: &'static str = "cargo binary name";
-}
-
-/// Kind marker: analysis purpose (`analysis_NNN_<purpose>`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AnalysisPurposeKind;
-
-impl NameTextKind for AnalysisPurposeKind {
-    const MAX_BYTES: usize = MAX_ANALYSIS_PURPOSE_BYTES;
-    const INVALID_CODE: HeatmapError = HeatmapError::TypeAnalysisPurposeInvalid;
-    const CORRUPTED_CODE: HeatmapError = HeatmapError::TypeAnalysisPurposeCorrupted;
-    const FIELD_LABEL: &'static str = "analysis purpose";
-}
-
-/// A short name of kind `K`, validated on construction and rechecked on read.
-/// Use the aliases `ScenarioName`, `CargoBinaryName`, `AnalysisPurpose`.
+/// Field is private: construct only with `scn_new`, read only with `scn_get`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NameText<K: NameTextKind> {
-    name_text: String,
-    kind: PhantomData<K>,
+pub struct ScenarioName {
+    scenario_name_text: String,
 }
 
-/// Scenario name, e.g. `pumpkin_world_spawn`.
-pub type ScenarioName = NameText<ScenarioNameKind>;
-/// Cargo binary name, e.g. `pumpkin`.
-pub type CargoBinaryName = NameText<CargoBinaryNameKind>;
-/// Analysis purpose, e.g. `count_baseline`.
-pub type AnalysisPurpose = NameText<AnalysisPurposeKind>;
-
-impl<K: NameTextKind> NameText<K> {
+impl ScenarioName {
     /// Validates and constructs.
     ///
     /// # Returns
-    /// - `Ok(NameText)`.
-    /// - `Err(K::INVALID_CODE)` (input validation: names come from the user or
-    ///   from a hand-editable config file): empty, longer than `K::MAX_BYTES`,
-    ///   or a byte outside `A-Z a-z 0-9 _ - .`.
+    /// - `Ok(ScenarioName)`.
+    /// - `Err(TypeScenarioNameInvalid)` (input validation: the name comes
+    ///   from the wizard or from a hand-editable config file): empty, longer
+    ///   than `MAX_SCENARIO_NAME_BYTES`, or a byte outside `A-Z a-z 0-9 _ - .`.
     ///
     /// # Modes
-    /// Debug builds print the field and the rejected text.
-    pub fn ntk_new(candidate_text: &str) -> Result<Self, HeatmapError> {
-        if !is_valid_metadata_text(candidate_text, K::MAX_BYTES) {
+    /// Debug builds print the rejected text. Production-release returns the code only.
+    pub fn scn_new(candidate_text: &str) -> Result<Self, HeatmapError> {
+        if !is_valid_metadata_text(candidate_text, MAX_SCENARIO_NAME_BYTES) {
             #[cfg(debug_assertions)]
             eprintln!(
-                "HIX-{}: invalid {} {:?} (1..={} of A-Z a-z 0-9 _ - .)",
-                K::INVALID_CODE.code(),
-                K::FIELD_LABEL,
+                "HIX-{}: invalid scenario name {:?} (1..={} of A-Z a-z 0-9 _ - .)",
+                HeatmapError::TypeScenarioNameInvalid.code(),
                 candidate_text,
-                K::MAX_BYTES
+                MAX_SCENARIO_NAME_BYTES
             );
-            return Err(K::INVALID_CODE);
+            return Err(HeatmapError::TypeScenarioNameInvalid);
         }
         Ok(Self {
-            name_text: candidate_text.to_string(),
-            kind: PhantomData,
+            scenario_name_text: candidate_text.to_string(),
         })
     }
 
@@ -2349,155 +2455,180 @@ impl<K: NameTextKind> NameText<K> {
     ///
     /// # Returns
     /// - `Ok(&str)`.
-    /// - `Err(K::CORRUPTED_CODE)` (internal invariant: `new` already checked
-    ///   the same rule, so a failure here means corrupted memory or a value
-    ///   built without `new`).
-    pub fn ntk_get(&self) -> Result<&str, HeatmapError> {
-        if !is_valid_metadata_text(&self.name_text, K::MAX_BYTES) {
+    /// - `Err(TypeScenarioNameCorrupted)` (internal invariant: `scn_new`
+    ///   checked the same rule, so a failure means the stored text changed
+    ///   after construction, e.g. memory corruption).
+    ///
+    /// # Modes
+    /// Debug builds (not test) panic; test and debug builds print;
+    /// production-release returns the code only.
+    pub fn scn_get(&self) -> Result<&str, HeatmapError> {
+        if !is_valid_metadata_text(&self.scenario_name_text, MAX_SCENARIO_NAME_BYTES) {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
                 false,
-                "HIX-{}: {} corrupted",
-                K::CORRUPTED_CODE.code(),
-                K::FIELD_LABEL
+                "HIX-{}: ScenarioName corrupted",
+                HeatmapError::TypeScenarioNameCorrupted.code()
             );
             #[cfg(debug_assertions)]
             eprintln!(
-                "HIX-{}: {} recheck failed",
-                K::CORRUPTED_CODE.code(),
-                K::FIELD_LABEL
+                "HIX-{}: ScenarioName recheck failed",
+                HeatmapError::TypeScenarioNameCorrupted.code()
             );
-            return Err(K::CORRUPTED_CODE);
+            return Err(HeatmapError::TypeScenarioNameCorrupted);
         }
-        Ok(self.name_text.as_str())
+        Ok(self.scenario_name_text.as_str())
     }
 }
 
-// ----------------------------------------------------------------------------
-// Path values 1
-// ----------------------------------------------------------------------------
-
-/// True if `candidate_text` can be stored as a quoted config value and read
-/// back unchanged: 1..=`MAX_CONFIG_PATH_BYTES` bytes, with no `"` (would end
-/// the value), no `\` (an escape in real TOML; refused so files stay valid
-/// TOML), and no control bytes (0x00-0x1F, 0x7F; a newline would split the line).
-/// Non-ASCII UTF-8 is allowed.
-fn is_valid_config_path_text(candidate_text: &str) -> bool {
-    !candidate_text.is_empty()
-        && candidate_text.len() <= MAX_CONFIG_PATH_BYTES
-        && candidate_text
-            .bytes()
-            .all(|byte| byte != b'"' && byte != b'\\' && byte >= 0x20 && byte != 0x7F)
-}
-
-/// An absolute path that can be written to a config file and read back
-/// unchanged (see `is_valid_config_path_text`). Stored as text, because a
-/// config file is text.
+/// Cargo binary name, e.g. `pumpkin`: the target program run with
+/// `cargo llvm-cov run --bin <name>`. Needed for workspaces with several binaries.
+///
+/// Field is private: construct only with `cbn_new`, read only with `cbn_get`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigPath {
-    path_text: String,
+pub struct CargoBinaryName {
+    cargo_binary_name_text: String,
 }
 
-impl ConfigPath {
+impl CargoBinaryName {
     /// Validates and constructs.
     ///
     /// # Returns
-    /// - `Ok(ConfigPath)`.
-    /// - `Err(CfgPathValueInvalid)` (input validation): not UTF-8, empty,
-    ///   too long, or contains `"`, `\`, or a control byte.
-    /// - `Err(CfgPathNotAbsolute)` (input validation).
+    /// - `Ok(CargoBinaryName)`.
+    /// - `Err(TypeCargoBinaryNameInvalid)` (input validation): empty, longer
+    ///   than `MAX_CARGO_BINARY_NAME_BYTES`, or a byte outside `A-Z a-z 0-9 _ - .`.
     ///
     /// # Modes
-    /// Debug builds print the rejected path.
-    pub fn cp_new(candidate_path: &Path) -> Result<Self, HeatmapError> {
-        let candidate_text = match candidate_path.to_str() {
-            Some(text) => text,
-            None => {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "HIX-{}: config path is not UTF-8: {}",
-                    HeatmapError::CfgPathValueInvalid.code(),
-                    candidate_path.display()
-                );
-                return Err(HeatmapError::CfgPathValueInvalid);
-            }
-        };
-        if !candidate_path.is_absolute() {
+    /// Debug builds print the rejected text. Production-release returns the code only.
+    pub fn cbn_new(candidate_text: &str) -> Result<Self, HeatmapError> {
+        if !is_valid_metadata_text(candidate_text, MAX_CARGO_BINARY_NAME_BYTES) {
             #[cfg(debug_assertions)]
             eprintln!(
-                "HIX-{}: config path is not absolute: {:?}",
-                HeatmapError::CfgPathNotAbsolute.code(),
-                candidate_text
+                "HIX-{}: invalid cargo binary name {:?} (1..={} of A-Z a-z 0-9 _ - .)",
+                HeatmapError::TypeCargoBinaryNameInvalid.code(),
+                candidate_text,
+                MAX_CARGO_BINARY_NAME_BYTES
             );
-            return Err(HeatmapError::CfgPathNotAbsolute);
-        }
-        if !is_valid_config_path_text(candidate_text) {
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "HIX-{}: config path not storable ({} bytes; max {}; no \" \\ or control bytes): {:?}",
-                HeatmapError::CfgPathValueInvalid.code(),
-                candidate_text.len(),
-                MAX_CONFIG_PATH_BYTES,
-                candidate_text
-            );
-            return Err(HeatmapError::CfgPathValueInvalid);
+            return Err(HeatmapError::TypeCargoBinaryNameInvalid);
         }
         Ok(Self {
-            path_text: candidate_text.to_string(),
+            cargo_binary_name_text: candidate_text.to_string(),
         })
     }
 
-    /// Returns the path text after rechecking it (used by the config writer).
+    /// Returns the name after rechecking it.
     ///
     /// # Returns
     /// - `Ok(&str)`.
-    /// - `Err(CfgPathValueCorrupted)` (internal invariant: `new` checked the same rules).
-    pub fn cp_get_text(&self) -> Result<&str, HeatmapError> {
-        let is_intact =
-            is_valid_config_path_text(&self.path_text) && Path::new(&self.path_text).is_absolute();
-        if !is_intact {
+    /// - `Err(TypeCargoBinaryNameCorrupted)` (internal invariant; see `scn_get`).
+    ///
+    /// # Modes
+    /// Debug builds (not test) panic; test and debug builds print;
+    /// production-release returns the code only.
+    pub fn cbn_get(&self) -> Result<&str, HeatmapError> {
+        if !is_valid_metadata_text(&self.cargo_binary_name_text, MAX_CARGO_BINARY_NAME_BYTES) {
             #[cfg(all(debug_assertions, not(test)))]
             debug_assert!(
                 false,
-                "HIX-{}: ConfigPath corrupted",
-                HeatmapError::CfgPathValueCorrupted.code()
+                "HIX-{}: CargoBinaryName corrupted",
+                HeatmapError::TypeCargoBinaryNameCorrupted.code()
             );
             #[cfg(debug_assertions)]
             eprintln!(
-                "HIX-{}: ConfigPath recheck failed",
-                HeatmapError::CfgPathValueCorrupted.code()
+                "HIX-{}: CargoBinaryName recheck failed",
+                HeatmapError::TypeCargoBinaryNameCorrupted.code()
             );
-            return Err(HeatmapError::CfgPathValueCorrupted);
+            return Err(HeatmapError::TypeCargoBinaryNameCorrupted);
         }
-        Ok(self.path_text.as_str())
+        Ok(self.cargo_binary_name_text.as_str())
+    }
+}
+
+/// Analysis purpose, e.g. `count_baseline`: names the analysis folder
+/// (`analysis_NNN_<purpose>`) made after each run.
+///
+/// Field is private: construct only with `apu_new`, read only with `apu_get`.
+/// (Prefix `apu_`, because `ap_` belongs to `AbsolutePath`.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisPurpose {
+    analysis_purpose_text: String,
+}
+
+impl AnalysisPurpose {
+    /// Validates and constructs.
+    ///
+    /// # Returns
+    /// - `Ok(AnalysisPurpose)`.
+    /// - `Err(TypeAnalysisPurposeInvalid)` (input validation): empty, longer
+    ///   than `MAX_ANALYSIS_PURPOSE_BYTES`, or a byte outside `A-Z a-z 0-9 _ - .`.
+    ///
+    /// # Modes
+    /// Debug builds print the rejected text. Production-release returns the code only.
+    pub fn apu_new(candidate_text: &str) -> Result<Self, HeatmapError> {
+        if !is_valid_metadata_text(candidate_text, MAX_ANALYSIS_PURPOSE_BYTES) {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: invalid analysis purpose {:?} (1..={} of A-Z a-z 0-9 _ - .)",
+                HeatmapError::TypeAnalysisPurposeInvalid.code(),
+                candidate_text,
+                MAX_ANALYSIS_PURPOSE_BYTES
+            );
+            return Err(HeatmapError::TypeAnalysisPurposeInvalid);
+        }
+        Ok(Self {
+            analysis_purpose_text: candidate_text.to_string(),
+        })
     }
 
-    /// Returns the path after rechecking it. Same errors as `get_text`.
-    pub fn cp_get(&self) -> Result<&Path, HeatmapError> {
-        Ok(Path::new(self.cp_get_text()?))
+    /// Returns the purpose after rechecking it.
+    ///
+    /// # Returns
+    /// - `Ok(&str)`.
+    /// - `Err(TypeAnalysisPurposeCorrupted)` (internal invariant; see `scn_get`).
+    ///
+    /// # Modes
+    /// Debug builds (not test) panic; test and debug builds print;
+    /// production-release returns the code only.
+    pub fn apu_get(&self) -> Result<&str, HeatmapError> {
+        if !is_valid_metadata_text(&self.analysis_purpose_text, MAX_ANALYSIS_PURPOSE_BYTES) {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: AnalysisPurpose corrupted",
+                HeatmapError::TypeAnalysisPurposeCorrupted.code()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: AnalysisPurpose recheck failed",
+                HeatmapError::TypeAnalysisPurposeCorrupted.code()
+            );
+            return Err(HeatmapError::TypeAnalysisPurposeCorrupted);
+        }
+        Ok(self.analysis_purpose_text.as_str())
     }
 }
 
 // ----------------------------------------------------------------------------
-// Path values 2
+// Path values stored in a config file
 // ----------------------------------------------------------------------------
 
 /// True if `candidate_text` can be written as a quoted config value and read
-/// back byte for byte by the config field reader.
+/// back byte for byte by the RSLF field reader.
 ///
-/// This checks the characters of the path itself. It does not touch the
-/// filesystem: the path need not exist.
+/// This checks the characters of the path only; it does not touch the
+/// filesystem (the path need not exist).
 ///
 /// Rules, and why each exists:
 /// - 1..=`MAX_CONFIG_PATH_BYTES` bytes: the read buffer for path fields has
-///   exactly this size, so a longer value would be refused when read.
+///   exactly this size, so a longer value would be refused when read (812).
 /// - no `"`: it would end the quoted value early.
 /// - no `\`: an escape character in real TOML. Refused so the file stays
 ///   valid TOML and any other TOML tool reads the same value.
 /// - no control bytes (0x00-0x1F, 0x7F): a newline would split the line;
 ///   the others cannot be seen or typed in a hand-edited file.
 ///
-/// Non-ASCII UTF-8 is allowed; the reader copies it byte for byte.
+/// Non-ASCII UTF-8 (e.g. accented folder names) is allowed; the reader copies
+/// it byte for byte.
 fn is_storable_config_field_path_text(candidate_text: &str) -> bool {
     !candidate_text.is_empty()
         && candidate_text.len() <= MAX_CONFIG_PATH_BYTES
@@ -2513,13 +2644,13 @@ fn is_storable_config_field_path_text(candidate_text: &str) -> bool {
 /// `write_new_config_file` and `load_config_file`.
 ///
 /// # Project context
-/// A config file is text, so this type stores the path as UTF-8 text that
-/// satisfies `is_storable_config_field_path_text`. Any value of this type can
-/// therefore be written to a config file and read back unchanged. Nothing is
-/// opened or checked on disk: whether the path exists is checked by the step
-/// that uses it (e.g. running cargo in the target crate).
+/// A config file is text, so the path is stored as UTF-8 text that satisfies
+/// `is_storable_config_field_path_text`. Any value of this type can be written
+/// to a config file and read back unchanged. The path is stored exactly as
+/// given (not normalized), and nothing is checked on disk: whether it exists
+/// is checked by the step that uses it (e.g. running cargo in the target crate).
 ///
-/// One accessor, `get_path_str`, so the value has one name and one recheck.
+/// Field is private: construct only with `cfp_new`, read only with `cfp_get`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigFieldPath {
     /// The path's own characters, e.g. `/home/user/code/Pumpkin`.
@@ -2530,33 +2661,39 @@ impl ConfigFieldPath {
     /// Validates and constructs.
     ///
     /// # Arguments
-    /// - `candidate_path`: from the user (wizard), from the working directory,
+    /// - `candidate_path`: from a wizard answer, from the working directory,
     ///   or from a config file being loaded.
     ///
     /// # Returns
     /// - `Ok(ConfigFieldPath)`.
-    /// - `Err(CfgPathValueInvalid)` (input validation): not UTF-8, empty,
-    ///   longer than `MAX_CONFIG_PATH_BYTES`, or contains `"`, `\`, or a control byte.
+    /// - `Err(CfgPathValueNotUtf8)` (input validation): a Linux path may hold
+    ///   bytes that are not UTF-8; such a path cannot be written as text.
+    ///   (Values loaded from a file never reach this: their bytes were
+    ///   already checked as UTF-8, code 830.)
     /// - `Err(CfgPathNotAbsolute)` (input validation).
+    /// - `Err(CfgPathValueNotStorable)` (input validation): empty, longer than
+    ///   `MAX_CONFIG_PATH_BYTES`, or contains `"`, `\`, or a control byte.
     ///
     /// # Modes
     /// Debug builds print the rejected path. Production-release returns the code only.
-    pub fn new(candidate_path: &Path) -> Result<Self, HeatmapError> {
+    pub fn cfp_new(candidate_path: &Path) -> Result<Self, HeatmapError> {
+        // --- Check: path is UTF-8 text ---
+        // input validation: paths come from the user, the OS, or a file.
         let candidate_text = match candidate_path.to_str() {
             Some(text) => text,
             None => {
                 #[cfg(debug_assertions)]
                 eprintln!(
                     "HIX-{}: config field path is not UTF-8: {}",
-                    HeatmapError::CfgPathValueInvalid.code(),
+                    HeatmapError::CfgPathValueNotUtf8.code(),
                     candidate_path.display()
                 );
-                return Err(HeatmapError::CfgPathValueInvalid);
+                return Err(HeatmapError::CfgPathValueNotUtf8);
             }
         };
 
         // --- Check: path is absolute ---
-        // input validation: paths come from the user or a hand-editable file.
+        // input validation: HIX uses absolute paths only.
         if !candidate_path.is_absolute() {
             #[cfg(debug_assertions)]
             eprintln!(
@@ -2573,12 +2710,12 @@ impl ConfigFieldPath {
             #[cfg(debug_assertions)]
             eprintln!(
                 "HIX-{}: config field path not storable ({} bytes, max {}; no \" \\ or control bytes): {:?}",
-                HeatmapError::CfgPathValueInvalid.code(),
+                HeatmapError::CfgPathValueNotStorable.code(),
                 candidate_text.len(),
                 MAX_CONFIG_PATH_BYTES,
                 candidate_text
             );
-            return Err(HeatmapError::CfgPathValueInvalid);
+            return Err(HeatmapError::CfgPathValueNotStorable);
         }
 
         Ok(Self {
@@ -2586,24 +2723,22 @@ impl ConfigFieldPath {
         })
     }
 
-    /// Returns the stored path itself, as `&str`, after rechecking it.
+    /// Returns the stored path's characters (e.g. `/home/user/code/Pumpkin`)
+    /// after rechecking them. No file is opened or read.
     ///
-    /// This returns the characters of the path (e.g. `/home/user/code/Pumpkin`),
-    /// not the contents of any file: no file is opened or read. Callers that
-    /// need a `&Path` wrap the result: `Path::new(field_path.get_path_str()?)`.
+    /// The one accessor for this value. Callers that need a `&Path` wrap the
+    /// result: `Path::new(field_path.cfp_get()?)`.
     ///
     /// # Returns
     /// - `Ok(&str)`.
-    /// - `Err(CfgPathValueCorrupted)` (internal invariant): `new` checked the
-    ///   same rules, so a failure means the stored value changed after
-    ///   construction (e.g. memory corruption) or was built without `new`.
+    /// - `Err(CfgPathValueCorrupted)` (internal invariant: `cfp_new` checked
+    ///   the same rules, so a failure means the stored text changed after
+    ///   construction, e.g. memory corruption).
     ///
     /// # Modes
-    /// Debug builds (not test) panic via `debug_assert!`; test and debug builds
-    /// print; production-release returns the code only.
-    pub fn get_path_str(&self) -> Result<&str, HeatmapError> {
-        // --- Check: stored path still satisfies the construction rules ---
-        // internal invariant: only `new` creates values, with these same checks.
+    /// Debug builds (not test) panic; test and debug builds print;
+    /// production-release returns the code only.
+    pub fn cfp_get(&self) -> Result<&str, HeatmapError> {
         let is_intact = is_storable_config_field_path_text(&self.field_path_text)
             && Path::new(&self.field_path_text).is_absolute();
         if !is_intact {
@@ -2630,18 +2765,23 @@ impl ConfigFieldPath {
 
 /// Everything needed to repeat a run (one config file).
 ///
-/// Every field is an enforced type, so a `HixConfig` that exists can always
-/// be written and read back unchanged. New fields: add a key constant, add
-/// it to `CONFIG_KEYS`, write it in `write_config_lines`, read it in
-/// `load_config_file`, and consider raising `CONFIG_FORMAT_VERSION`.
+/// Every field is a validated type, so any `HixConfig` can be written and
+/// read back unchanged. It is built with a struct literal inside this module
+/// (the wizard, `load_config_file`, tests); its fields are private to this
+/// module.
+///
+/// Adding a field: add a key constant, add it to `CONFIG_KEYS` (and
+/// `CONFIG_KEY_COUNT`), write it in `write_config_lines`, read it in
+/// `load_config_file`, update the layout test, and consider raising
+/// `CONFIG_FORMAT_VERSION`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HixConfig {
     /// Crate directory where cargo commands for the target run.
-    target_crate_path: ConfigPath,
-    /// Binary to run (`--bin`); required for workspaces with several binaries.
+    target_crate_path: ConfigFieldPath,
+    /// Binary to run (`--bin`).
     target_binary_name: CargoBinaryName,
     /// Directory holding the `run_NNN_<scenario>` folders.
-    modeling_data_path: ConfigPath,
+    modeling_data_path: ConfigFieldPath,
     /// Scenario: names the run folders and this config file.
     scenario_name: ScenarioName,
     /// Purpose of the analysis made after each run (`analysis_NNN_<purpose>`).
@@ -2654,13 +2794,13 @@ pub struct HixConfig {
     demangle_outputs: bool,
 }
 
-/// Config file name for a scenario: `hix_<scenario>.toml`.
+/// Config file name for a scenario: `hixtoml_<scenario>.toml`.
 ///
 /// # Returns
 /// - `Ok(file_name)`.
 /// - `Err(TypeScenarioNameCorrupted)` from the name's recheck.
 fn config_file_name_for_scenario(scenario_name: &ScenarioName) -> Result<String, HeatmapError> {
-    let scenario_text = scenario_name.ntk_get()?;
+    let scenario_text = scenario_name.scn_get()?;
     let name_length = CONFIG_FILE_NAME_PREFIX
         .len()
         .saturating_add(scenario_text.len())
@@ -2678,9 +2818,10 @@ fn config_file_name_for_scenario(scenario_name: &ScenarioName) -> Result<String,
 
 /// Maps a failed write into the render buffer to its code.
 ///
-/// Internal invariant: `CONFIG_FILE_MAX_BYTES` holds a config with every field
-/// at its maximum (checked by test), so this happens only with a smaller
-/// buffer (tests) or after a key or field was added without raising the size.
+/// Internal invariant: `CONFIG_FILE_MAX_BYTES` holds a config with every
+/// field at its maximum (checked by test), so this happens only with a
+/// smaller buffer (tests) or after a key or field was added without raising
+/// the size.
 fn config_render_error(_io_error: std::io::Error) -> HeatmapError {
     #[cfg(all(debug_assertions, not(test)))]
     debug_assert!(
@@ -2698,7 +2839,7 @@ fn config_render_error(_io_error: std::io::Error) -> HeatmapError {
     HeatmapError::CfgRenderBufferFull
 }
 
-/// Writes the config file lines (the layout in the section comment above).
+/// Writes the config file lines in the layout shown in the section comment.
 ///
 /// # Returns
 /// - `Ok(())`.
@@ -2728,35 +2869,35 @@ fn write_config_lines<W: Write>(
         config_writer,
         "{} = \"{}\"",
         CONFIG_KEY_TARGET_CRATE_PATH,
-        config.target_crate_path.cp_get_text()?
+        config.target_crate_path.cfp_get()?
     )
     .map_err(config_render_error)?;
     writeln!(
         config_writer,
         "{} = \"{}\"",
         CONFIG_KEY_TARGET_BINARY_NAME,
-        config.target_binary_name.ntk_get()?
+        config.target_binary_name.cbn_get()?
     )
     .map_err(config_render_error)?;
     writeln!(
         config_writer,
         "{} = \"{}\"",
         CONFIG_KEY_MODELING_DATA_PATH,
-        config.modeling_data_path.cp_get_text()?
+        config.modeling_data_path.cfp_get()?
     )
     .map_err(config_render_error)?;
     writeln!(
         config_writer,
         "{} = \"{}\"",
         CONFIG_KEY_SCENARIO_NAME,
-        config.scenario_name.ntk_get()?
+        config.scenario_name.scn_get()?
     )
     .map_err(config_render_error)?;
     writeln!(
         config_writer,
         "{} = \"{}\"",
         CONFIG_KEY_ANALYSIS_PURPOSE,
-        config.analysis_purpose.ntk_get()?
+        config.analysis_purpose.apu_get()?
     )
     .map_err(config_render_error)?;
     writeln!(
@@ -2789,13 +2930,13 @@ fn write_config_lines<W: Write>(
 ///
 /// # Project context
 /// The whole file is formatted in memory before the file is created, so a
-/// failure never leaves a half-written config on disk (HIX never deletes).
-/// The caller (`write_new_config_file`) passes a `CONFIG_FILE_MAX_BYTES`
-/// stack array; tests also pass smaller buffers.
+/// formatting failure never leaves a half-written config on disk. The caller
+/// (`write_new_config_file`) passes a `CONFIG_FILE_MAX_BYTES` stack array;
+/// tests also pass smaller buffers.
 ///
 /// # Returns
-/// - `Ok(rendered_bytes)`: the start of `output_buffer` holding the file text.
-/// - `Err(CfgRenderBufferFull)` (from `config_render_error`): the text does not fit.
+/// - `Ok(rendered_bytes)`: the start of `output_buffer`, holding the file text.
+/// - `Err(CfgRenderBufferFull)`: the text does not fit.
 /// - `Err(CfgRenderedRangeInvalid)` (internal invariant): the writer's end
 ///   position does not describe a range inside the buffer.
 /// - `Err` from a field's recheck (`CfgPathValueCorrupted`, `Type*Corrupted`).
@@ -2846,23 +2987,23 @@ fn render_config_file_text<'buffer>(
 ///
 /// # Project context
 /// Config files are a permanent record of how runs were made, like run and
-/// analysis folders, so an existing file is never overwritten. The reader
-/// defines the file format; the writer is checked against the reader rather
-/// than trusted: the file is read back with the same no-heap reader that the
-/// wizard and replay use, and compared with what was meant.
+/// analysis folders, so an existing file is never overwritten. The file is
+/// read back with the same no-heap reader that replay uses and compared with
+/// what was meant, so a writer/reader mismatch is caught at write time, not
+/// at the next replay.
 ///
 /// # Steps
 /// 1. Render the whole text into a stack buffer (nothing on disk yet).
 /// 2. Create the file (create-new; Tier-1 retry for transient errors),
-///    write it in one `write_all`, and sync it to disk.
+///    write it with one `write_all`, and sync it to disk.
 /// 3. Load it with `load_config_file` and compare with `config`.
 ///
 /// If step 2 or 3 fails after the file was created, the file stays in place
 /// (HIX never deletes); the returned code says not to use it.
 ///
 /// # Arguments
-/// - `config_file_path`: absolute path of the config file to create; its
-///   directory must already exist.
+/// - `config_file_path`: absolute path of the file to create, normally
+///   `config_files/hixtoml_<scenario>.toml`. Its directory must exist (821 if not).
 /// - `config`: the config to write.
 ///
 /// # Returns
@@ -2945,7 +3086,8 @@ pub fn write_new_config_file(
 /// - Errors from the field reader (e.g. 811 missing, 812 too long).
 /// - `Err(CfgValueLengthInvalid)` (internal invariant: the reader's length
 ///   is within its buffer).
-/// - `Err(CfgValueNotUtf8)` (input validation).
+/// - `Err(CfgValueNotUtf8)` (input validation: a hand-edited file may hold
+///   non-UTF-8 bytes).
 /// - Errors from `parse_value`.
 fn read_config_value<T, F, const VALUE_BUFFER_BYTES: usize>(
     config_file_path: &Path,
@@ -2996,7 +3138,11 @@ where
 }
 
 /// Checks `hix_config_version`.
-/// `Err(CfgVersionNotANumber | CfgUnsupportedVersion)` (input validation).
+///
+/// # Returns
+/// - `Ok(())` when the version equals `CONFIG_FORMAT_VERSION`.
+/// - `Err(CfgVersionNotANumber)` (input validation): not a u32 number.
+/// - `Err(CfgUnsupportedVersion)` (input validation): a different version.
 fn check_config_format_version(value_text: &str) -> Result<(), HeatmapError> {
     let format_version = match value_text.trim().parse::<u32>() {
         Ok(version) => version,
@@ -3024,36 +3170,58 @@ fn check_config_format_version(value_text: &str) -> Result<(), HeatmapError> {
     Ok(())
 }
 
-/// Parses a path value. Errors: see `ConfigPath::new`.
-fn parse_config_path(value_text: &str) -> Result<ConfigPath, HeatmapError> {
-    ConfigPath::cp_new(Path::new(value_text))
+/// Parses a path field value (`target_crate_path`, `modeling_data_path`).
+/// Errors: see `ConfigFieldPath::cfp_new`.
+fn parse_config_field_path(value_text: &str) -> Result<ConfigFieldPath, HeatmapError> {
+    ConfigFieldPath::cfp_new(Path::new(value_text))
 }
 
-/// Parses `top_n`. `Err(CfgTopNInvalid)` (input validation): not a number
-/// or outside 1..=`MAX_TOP_N`. A config-specific code, so a bad config is not
-/// reported as a command-line mistake.
+/// Parses `top_n`. Config-specific codes, so a bad config is never reported
+/// as a command-line mistake (the CLI codes make `main` print usage text).
+///
+/// # Returns
+/// - `Ok(TopNCount)`.
+/// - `Err(CfgTopNNotANumber)` (input validation): not a u16 number
+///   (this includes numbers above 65535).
+/// - `Err(CfgTopNOutOfRange)` (input validation): outside 1..=`MAX_TOP_N`.
+///
+/// # Modes
+/// Debug builds print the value. For out-of-range values, `tnc_new` also
+/// prints its own type-level line first; the config line follows it.
 fn parse_config_top_n(value_text: &str) -> Result<TopNCount, HeatmapError> {
     let top_n_value = match value_text.trim().parse::<u16>() {
         Ok(value) => value,
         Err(_parse_error) => {
             #[cfg(debug_assertions)]
             eprintln!(
-                "HIX-{}: top_n {:?}: {}",
-                HeatmapError::CfgTopNInvalid.code(),
+                "HIX-{}: config top_n {:?} is not a u16 number: {}",
+                HeatmapError::CfgTopNNotANumber.code(),
                 value_text,
                 _parse_error
             );
-            return Err(HeatmapError::CfgTopNInvalid);
+            return Err(HeatmapError::CfgTopNNotANumber);
         }
     };
     match TopNCount::tnc_new(top_n_value) {
         Ok(top_n) => Ok(top_n),
-        Err(_type_error) => Err(HeatmapError::CfgTopNInvalid),
+        Err(_type_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: config top_n {} outside 1..={}",
+                HeatmapError::CfgTopNOutOfRange.code(),
+                top_n_value,
+                MAX_TOP_N
+            );
+            Err(HeatmapError::CfgTopNOutOfRange)
+        }
     }
 }
 
 /// Parses a boolean: exactly `true` or `false` (spaces around allowed).
-/// `Err(CfgBooleanInvalid)` (input validation).
+///
+/// # Returns
+/// - `Ok(bool)`.
+/// - `Err(CfgBooleanInvalid)` (input validation).
 fn parse_config_boolean(value_text: &str) -> Result<bool, HeatmapError> {
     match value_text.trim() {
         "true" => Ok(true),
@@ -3061,7 +3229,7 @@ fn parse_config_boolean(value_text: &str) -> Result<bool, HeatmapError> {
         _ => {
             #[cfg(debug_assertions)]
             eprintln!(
-                "HIX-{}: boolean {:?} is not true or false",
+                "HIX-{}: config boolean {:?} is not true or false",
                 HeatmapError::CfgBooleanInvalid.code(),
                 value_text
             );
@@ -3070,12 +3238,29 @@ fn parse_config_boolean(value_text: &str) -> Result<bool, HeatmapError> {
     }
 }
 
-/// Parses `work_unit_name`. `Err(CfgWorkUnitNameInvalid)` (input validation);
-/// a config-specific code, so a bad config is not reported as a command-line mistake.
+/// Parses `work_unit_name`. A config-specific code, so a bad config is never
+/// reported as a command-line mistake.
+///
+/// # Returns
+/// - `Ok(WorkUnitName)`.
+/// - `Err(CfgWorkUnitNameInvalid)` (input validation).
+///
+/// # Modes
+/// Debug builds print the value. `wun_new` also prints its own type-level
+/// line first (worded for the `--work-unit-name` flag); the config line follows it.
 fn parse_config_work_unit_name(value_text: &str) -> Result<WorkUnitName, HeatmapError> {
     match WorkUnitName::wun_new(value_text) {
         Ok(work_unit_name) => Ok(work_unit_name),
-        Err(_type_error) => Err(HeatmapError::CfgWorkUnitNameInvalid),
+        Err(_type_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: config work_unit_name {:?} (1..={} of A-Z a-z 0-9 _ - .)",
+                HeatmapError::CfgWorkUnitNameInvalid.code(),
+                value_text,
+                MAX_WORK_UNIT_NAME_BYTES
+            );
+            Err(HeatmapError::CfgWorkUnitNameInvalid)
+        }
     }
 }
 
@@ -3084,17 +3269,18 @@ fn parse_config_work_unit_name(value_text: &str) -> Result<WorkUnitName, Heatmap
 /// # Steps
 /// 1. Refuse duplicate keys (816), so no value is silently ignored.
 /// 2. Require `hix_config_version` == `CONFIG_FORMAT_VERSION`.
-/// 3. Read each field into a stack buffer and build its enforced type.
-///    `work_unit_name` is optional (missing = `None`); all others are required.
+/// 3. Read each field into a stack array sized to its maximum and build its
+///    validated type. `work_unit_name` is optional (missing = `None`); all
+///    others are required.
 ///
 /// Cost: about two file opens per key, each read one byte per read call.
 /// Negligible for a file of about a dozen lines.
 ///
 /// # Returns
 /// - `Ok(HixConfig)`.
-/// - `Err`: field-reader codes 801-816 (811: a required key is missing;
-///   812: a value is longer than its buffer); 817-818 (paths);
-///   829-835; 164/166/168 (names); 155 (the file path's own recheck).
+/// - `Err`: 155 (the file path's own recheck); field-reader codes 801-816
+///   (811: a required key is missing; 812: a value is longer than its
+///   buffer); 817, 818, 837 (paths); 830-835, 838; 164/166/168 (names).
 pub fn load_config_file(config_file_path: &AbsolutePath) -> Result<HixConfig, HeatmapError> {
     let file_path = config_file_path.ap_get()?;
     check_toml_keys_are_unique_no_heap(file_path, &CONFIG_KEYS)?;
@@ -3108,27 +3294,27 @@ pub fn load_config_file(config_file_path: &AbsolutePath) -> Result<HixConfig, He
     let target_crate_path = read_config_value::<_, _, MAX_CONFIG_PATH_BYTES>(
         file_path,
         CONFIG_KEY_TARGET_CRATE_PATH,
-        parse_config_path,
+        parse_config_field_path,
     )?;
     let target_binary_name = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
         file_path,
         CONFIG_KEY_TARGET_BINARY_NAME,
-        CargoBinaryName::ntk_new,
+        CargoBinaryName::cbn_new,
     )?;
     let modeling_data_path = read_config_value::<_, _, MAX_CONFIG_PATH_BYTES>(
         file_path,
         CONFIG_KEY_MODELING_DATA_PATH,
-        parse_config_path,
+        parse_config_field_path,
     )?;
     let scenario_name = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
         file_path,
         CONFIG_KEY_SCENARIO_NAME,
-        ScenarioName::ntk_new,
+        ScenarioName::scn_new,
     )?;
     let analysis_purpose = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
         file_path,
         CONFIG_KEY_ANALYSIS_PURPOSE,
-        AnalysisPurpose::ntk_new,
+        AnalysisPurpose::apu_new,
     )?;
     let top_n = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
         file_path,
@@ -3163,14 +3349,14 @@ pub fn load_config_file(config_file_path: &AbsolutePath) -> Result<HixConfig, He
     })
 }
 
-// end TOML section
+// end hix toml files
 
 // ============================================================================
 // Enforced custom types (value integrity)
 // ============================================================================
 
 /// Number of rows per Top-N table. Valid range: 1..=MAX_TOP_N.
-/// Field is private: construct only through `new`, read only through `get`.
+/// Field is private: construct only with `tnc_new`, read only with `tnc_get`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TopNCount {
     top_n_value: u16,
@@ -3540,7 +3726,7 @@ struct FileCoverageRecord {
 }
 
 impl FileCoverageRecord {
-    fn new(source_path_text: &str) -> Self {
+    fn fcr_new(source_path_text: &str) -> Self {
         Self {
             source_path_text: source_path_text.to_string(),
             function_definitions: Vec::new(),
@@ -3580,7 +3766,7 @@ enum LoopKeyword {
 }
 
 impl LoopKeyword {
-    fn as_label(self) -> &'static str {
+    fn lk_label(self) -> &'static str {
         match self {
             LoopKeyword::For => "for",
             LoopKeyword::While => "while",
@@ -3661,7 +3847,7 @@ impl FileSkipReason {
     }
 
     /// Report label; matches the `[loop-scan coverage]` counter wording.
-    fn as_label(self) -> &'static str {
+    fn fsr_label(self) -> &'static str {
         match self {
             FileSkipReason::NonAbsolutePath => "path not absolute",
             FileSkipReason::NotFound => "not found",
@@ -3861,11 +4047,21 @@ struct ReportInputs<'a> {
 // Public entry points
 // ============================================================================
 
-/// Runs end to end using the process command line.
+/// Runs HIX using the process command line.
 ///
-/// Steps: parse args -> parse LCOV -> function sites -> loop sites ->
-/// summarize -> write text report + TSV -> print report to stdout.
+/// # Modes of use
+/// - `hix --wizard` (the only argument): the interactive wizard
+///   (`run_wizard_cli`).
+/// - Anything else: the manual path, unchanged. Arguments are parsed and
+///   validated by `parse_cli_arguments`, then: parse LCOV -> function sites
+///   -> loop sites -> summarize -> write text report + TSV -> print report.
+///
+/// `--wizard` together with other arguments goes to the manual parser,
+/// which refuses it as an unknown flag (102) and shows the usage text.
 pub fn run_heatmap_cli() -> Result<(), HeatmapError> {
+    if is_wizard_invocation(std::env::args_os()) {
+        return run_wizard_cli();
+    }
     let run_configuration = parse_cli_arguments(std::env::args_os())?;
     run_heatmap_with_configuration(&run_configuration)
 }
@@ -4414,7 +4610,9 @@ fn open_file_with_retry(
     Err(codes.transient)
 }
 
-/// Creates/truncates a file and writes all bytes.
+/// Creates a new file (create-new: refuses an existing file with
+/// `RptOpenAlreadyExists`, never truncates) and writes all bytes.
+/// Used for the report and TSV inside the newly created `--out-dir`.
 fn write_bytes_to_new_file(file_path: &Path, file_bytes: &[u8]) -> Result<(), HeatmapError> {
     let mut output_file = open_file_with_retry(
         file_path,
@@ -4750,7 +4948,7 @@ fn parse_one_lcov_line(
         if completed_records.len() >= MAX_SOURCE_FILES {
             return Err(HeatmapError::LcovTooManyFiles);
         }
-        *current_record = Some(FileCoverageRecord::new(source_path_text));
+        *current_record = Some(FileCoverageRecord::fcr_new(source_path_text));
         return Ok(());
     }
 
@@ -5414,7 +5612,7 @@ fn scan_source_reader<R: BufRead>(
 
         let mut loop_display_name =
             String::with_capacity(enclosing_function_name.len().saturating_add(16));
-        loop_display_name.push_str(loop_keyword.as_label());
+        loop_display_name.push_str(loop_keyword.lk_label());
         loop_display_name.push_str(" loop in ");
         loop_display_name.push_str(enclosing_function_name);
 
@@ -6042,7 +6240,7 @@ fn write_loop_scan_file_notes<W: Write>(
         writeln!(
             report_writer,
             "    {:<30}  code {:>3}  {}",
-            note.reason.as_label(),
+            note.reason.fsr_label(),
             note.error_code,
             source_path_text
         )
@@ -7005,25 +7203,1419 @@ fn write_tsv_rows<W: Write>(
 }
 
 // ============================================================================
+// Wizard (interactive setup and run): Stage 1
+// ============================================================================
+//
+// Purpose
+//   `hix --wizard` guides a person through one count-heat run, so runs are
+//   made the same way every time and every input is written down in a
+//   config file. Stage 1 (this section) does checks and questions only:
+//   1. refuse root and sudo (perf access is a kernel setting, not sudo);
+//   2. check every tool HIX uses; stop if any is missing;
+//   3. report `perf_event_paranoid` (never changed, never blocks);
+//   4. choose the HIX base directory (holds `modeling_data/` and
+//      `config_files/`) and offer to create missing ones;
+//   5. use an existing config file or write a new one;
+//   6. work out the next run folder (`run_NNN_<scenario>`);
+//   7. print the planned commands, then stop.
+//   It runs no target commands and creates no run folder. Running the
+//   planned commands is Stage 2.
+//
+// Extent of this section
+//   From this header to the closing brace of `write_planned_run_steps`.
+//
+// Input and output
+//   All question-and-answer code takes a `BufRead` (answers) and a `Write`
+//   (questions and messages). `run_wizard_cli` passes the terminal; tests
+//   pass in-memory text. Wizard text is normal program output for the person
+//   at the terminal (it shows paths they chose); it is not error-message text.
+//   Error codes are still returned for `main` to report and log.
+//
+// Loops
+//   Re-asking after a rejected answer has no fixed limit: this is the one
+//   agreed exception to bounded loops. Every re-ask reads a new answer, and
+//   end of input (706) or a read error (707) ends the loop. All other loops
+//   are bounded by the MAX_* constants below.
+//
+// Memory
+//   Answers, directory listings, and tool output are small heap values
+//   (`String`, `Vec`). Answers and listings are capped by the constants
+//   below. Tool output is collected by `Command::output()` without a cap;
+//   every checked command prints a few lines.
+//
+// Error codes: 701-729.
+
+/// The only argument that selects the wizard.
+const WIZARD_FLAG: &str = "--wizard";
+
+/// Longest accepted answer line, in bytes, including its line ending.
+/// Above every field's maximum (the longest is a path, `MAX_CONFIG_PATH_BYTES`).
+const MAX_WIZARD_ANSWER_BYTES: usize = 2 * MAX_CONFIG_PATH_BYTES;
+
+/// Most entries read from `modeling_data/` when finding the next run number.
+const MAX_MODELING_DATA_ENTRIES: usize = 100_000;
+
+/// Most entries read from `config_files/` when listing config files.
+const MAX_CONFIG_DIRECTORY_ENTRIES: usize = 999;
+
+/// Most lines of tool output searched (e.g. for `llvm-tools`).
+const MAX_TOOL_OUTPUT_LINES: usize = 10_000;
+
+/// Most lines of `/proc/self/status` searched for the `Uid:` line.
+const MAX_PROC_STATUS_LINES: usize = 1_000;
+
+/// Highest run number. Matches the compile-time guard that `run_9999_<scenario>`
+/// fits in a run label.
+const MAX_RUN_NUMBER: u32 = 9999;
+
+/// Directory names inside the HIX base directory.
+const MODELING_DATA_DIRECTORY_NAME: &str = "modeling_data";
+const CONFIG_FILES_DIRECTORY_NAME: &str = "config_files";
+
+/// Run folders are `run_NNN_<scenario>`; analysis folders `analysis_NNN_<purpose>`.
+const RUN_FOLDER_NAME_PREFIX: &str = "run_";
+const ANALYSIS_FOLDER_NAME_PREFIX: &str = "analysis_";
+
+/// Each run's first analysis number (analysis numbers start at 1 per run).
+const FIRST_ANALYSIS_NUMBER: u32 = 1;
+
+/// Default analysis purpose offered when creating a config.
+const DEFAULT_ANALYSIS_PURPOSE: &str = "count_baseline";
+
+/// Output names for the demangled copies (written by Stage 2).
+const DEMANGLED_REPORT_FILE_NAME: &str = "hix_report.demangled.txt";
+const DEMANGLED_SITES_TSV_FILE_NAME: &str = "hix_sites.demangled.tsv";
+
+/// Linux files read by the wizard (read only, never written).
+const PROC_SELF_STATUS_PATH: &str = "/proc/self/status";
+const PERF_EVENT_PARANOID_PATH: &str = "/proc/sys/kernel/perf_event_paranoid";
+
+/// Highest `perf_event_paranoid` value that lets a normal user profile
+/// their own programs (user space).
+const PERF_PARANOID_USER_PROFILING_MAX: i32 = 2;
+
+/// Printed when the wizard is run as root or under sudo.
+const WIZARD_SUDO_HALT_TEXT: &str = "\
+Do not run HIX with sudo or as root.
+perf access is set once by an administrator through the kernel setting
+kernel.perf_event_paranoid (HIX reports it and never changes it).
+Run HIX again as your normal user, without sudo.";
+
+/// One tool check: a command HIX runs to confirm a tool is installed.
+struct RequiredToolCheck {
+    /// Name shown in the tool list.
+    tool_label: &'static str,
+    /// Program run directly (no shell), found through PATH.
+    program_name: &'static str,
+    program_arguments: &'static [&'static str],
+    /// `Some(prefix)`: installed only if an output line starts with `prefix`
+    /// (used for rustup components). `None`: a successful run is enough.
+    required_line_prefix: Option<&'static str>,
+    /// Shown when the tool is missing. HIX never installs anything.
+    install_hint: &'static str,
+}
+
+/// Number of tool checks.
+const WIZARD_TOOL_CHECK_COUNT: usize = 7;
+
+/// Every tool HIX uses, checked before anything else is done.
+const WIZARD_TOOL_CHECKS: [RequiredToolCheck; WIZARD_TOOL_CHECK_COUNT] = [
+    RequiredToolCheck {
+        tool_label: "rustup",
+        program_name: "rustup",
+        program_arguments: &["--version"],
+        required_line_prefix: None,
+        install_hint: "see https://rustup.rs/",
+    },
+    RequiredToolCheck {
+        tool_label: "rustc",
+        program_name: "rustc",
+        program_arguments: &["--version"],
+        required_line_prefix: None,
+        install_hint: "rustup toolchain install stable",
+    },
+    RequiredToolCheck {
+        tool_label: "cargo",
+        program_name: "cargo",
+        program_arguments: &["--version"],
+        required_line_prefix: None,
+        install_hint: "rustup toolchain install stable",
+    },
+    RequiredToolCheck {
+        tool_label: "cargo-llvm-cov",
+        program_name: "cargo",
+        program_arguments: &["llvm-cov", "--version"],
+        required_line_prefix: None,
+        install_hint: "cargo install cargo-llvm-cov",
+    },
+    RequiredToolCheck {
+        tool_label: "llvm-tools",
+        program_name: "rustup",
+        program_arguments: &["component", "list", "--installed"],
+        required_line_prefix: Some("llvm-tools"),
+        install_hint: "rustup component add llvm-tools-preview",
+    },
+    RequiredToolCheck {
+        tool_label: "rustfilt",
+        program_name: "rustfilt",
+        program_arguments: &["--version"],
+        required_line_prefix: None,
+        install_hint: "cargo install rustfilt",
+    },
+    RequiredToolCheck {
+        tool_label: "perf",
+        program_name: "perf",
+        program_arguments: &["--version"],
+        required_line_prefix: None,
+        install_hint: "install your system's perf package (Fedora: dnf install perf, as an administrator)",
+    },
+];
+
+/// Result of one tool check. Every case is an outcome to report, not an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolCheckOutcome {
+    /// Installed; the line shown (first output line, or the matched line).
+    Installed { reported_line: String },
+    /// The program is not on PATH.
+    NotFound,
+    /// The program exists but could not be started (e.g. permissions).
+    CouldNotStart,
+    /// The program ran but exited with an error.
+    ExitedWithFailure,
+    /// The program ran, but no output line starts with the required prefix.
+    RequiredLineMissing,
+}
+
+// ----------------------------------------------------------------------------
+// Entry
+// ----------------------------------------------------------------------------
+
+/// True if the command line is exactly `hix --wizard`.
+/// Reads at most two arguments after the program name (no loop).
+fn is_wizard_invocation<I: Iterator<Item = OsString>>(arguments: I) -> bool {
+    let mut remaining_arguments = arguments.skip(1);
+    let first_is_wizard_flag = matches!(
+        remaining_arguments.next(),
+        Some(argument) if argument.to_str() == Some(WIZARD_FLAG)
+    );
+    first_is_wizard_flag && remaining_arguments.next().is_none()
+}
+
+/// Runs the wizard on the terminal (Stage 1: checks, questions, planned run).
+///
+/// # Steps
+/// 1. Root/sudo check (701-704). 2. Tool checks (705). 3. perf_event_paranoid
+/// report (never fails the wizard). 4. Current directory (709).
+/// 5. The question-and-answer part, `run_wizard_setup_dialog`.
+///
+/// # Returns
+/// - `Ok(())`: the planned run was printed.
+/// - `Err`: the first stop condition's code (see the codes above).
+pub fn run_wizard_cli() -> Result<(), HeatmapError> {
+    let standard_output = std::io::stdout();
+    let mut wizard_output = standard_output.lock();
+
+    writeln!(wizard_output, "HIX wizard\n==========\n\n[checks]").map_err(wizard_output_error)?;
+    check_not_running_as_root_or_sudo(&mut wizard_output)?;
+    check_required_tools(&mut wizard_output)?;
+    report_perf_event_paranoid(&mut wizard_output)?;
+
+    let current_directory = match std::env::current_dir() {
+        Ok(directory) => directory,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: current_dir failed: {}",
+                HeatmapError::WizCurrentDirectoryUnavailable.code(),
+                _io_error
+            );
+            return Err(HeatmapError::WizCurrentDirectoryUnavailable);
+        }
+    };
+
+    let standard_input = std::io::stdin();
+    let mut wizard_input = standard_input.lock();
+    run_wizard_setup_dialog(&mut wizard_input, &mut wizard_output, &current_directory)
+}
+
+/// Maps a failed write of wizard output to its code (one mapping for all
+/// wizard writes, like `report_buffer_write_error` for the report).
+fn wizard_output_error(_io_error: std::io::Error) -> HeatmapError {
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "HIX-{}: wizard output write failed: {}",
+        HeatmapError::WizOutputWriteFailed.code(),
+        _io_error
+    );
+    HeatmapError::WizOutputWriteFailed
+}
+
+// ----------------------------------------------------------------------------
+// Checks (no questions)
+// ----------------------------------------------------------------------------
+
+/// Stops if HIX runs as root or under sudo.
+///
+/// # Project context
+/// perf access for a normal user is a kernel setting
+/// (`kernel.perf_event_paranoid`), set once by an administrator. Running HIX
+/// with sudo would instead create root-owned files in the user's folders and
+/// run cargo as root. So the wizard refuses and says what to do instead.
+///
+/// # Returns
+/// - `Ok(())`: normal user.
+/// - `Err(WizProcStatusUnreadable | WizProcStatusMalformed)`: cannot tell.
+/// - `Err(WizRunningAsRoot)`: effective uid is 0.
+/// - `Err(WizRunningUnderSudo)`: `SUDO_UID` or `SUDO_USER` is set.
+/// - `Err(WizOutputWriteFailed)`.
+fn check_not_running_as_root_or_sudo<W: Write>(wizard_output: &mut W) -> Result<(), HeatmapError> {
+    let status_bytes = match fs::read(PROC_SELF_STATUS_PATH) {
+        Ok(bytes) => bytes,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: read {} failed: {}",
+                HeatmapError::WizProcStatusUnreadable.code(),
+                PROC_SELF_STATUS_PATH,
+                _io_error
+            );
+            writeln!(
+                wizard_output,
+                "  could not read {} (needed for the sudo check)",
+                PROC_SELF_STATUS_PATH
+            )
+            .map_err(wizard_output_error)?;
+            return Err(HeatmapError::WizProcStatusUnreadable);
+        }
+    };
+    let effective_uid = parse_effective_uid_from_proc_status(&status_bytes)?;
+
+    if effective_uid == 0 {
+        writeln!(wizard_output, "{}", WIZARD_SUDO_HALT_TEXT).map_err(wizard_output_error)?;
+        return Err(HeatmapError::WizRunningAsRoot);
+    }
+    let sudo_variable_present =
+        std::env::var_os("SUDO_UID").is_some() || std::env::var_os("SUDO_USER").is_some();
+    if sudo_variable_present {
+        writeln!(wizard_output, "{}", WIZARD_SUDO_HALT_TEXT).map_err(wizard_output_error)?;
+        return Err(HeatmapError::WizRunningUnderSudo);
+    }
+
+    writeln!(
+        wizard_output,
+        "  {:<16} ok       not root, not under sudo",
+        "user"
+    )
+    .map_err(wizard_output_error)?;
+    Ok(())
+}
+
+/// Reads the effective uid (second number of the `Uid:` line) from the text
+/// of `/proc/self/status`.
+///
+/// # Returns
+/// - `Ok(uid)`.
+/// - `Err(WizProcStatusMalformed)`: no `Uid:` line within
+///   `MAX_PROC_STATUS_LINES`, no second field, or the field is not a number.
+fn parse_effective_uid_from_proc_status(status_bytes: &[u8]) -> Result<u32, HeatmapError> {
+    let effective_uid = status_bytes
+        .split(|byte| *byte == b'\n')
+        .take(MAX_PROC_STATUS_LINES)
+        .find_map(|line| line.strip_prefix(b"Uid:".as_slice()))
+        .and_then(|uid_fields| {
+            uid_fields
+                .split(|byte| byte.is_ascii_whitespace())
+                .filter(|field| !field.is_empty())
+                .nth(1)
+        })
+        .and_then(|field| std::str::from_utf8(field).ok())
+        .and_then(|field_text| field_text.parse::<u32>().ok());
+    match effective_uid {
+        Some(uid) => Ok(uid),
+        None => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: no effective uid in {}",
+                HeatmapError::WizProcStatusMalformed.code(),
+                PROC_SELF_STATUS_PATH
+            );
+            Err(HeatmapError::WizProcStatusMalformed)
+        }
+    }
+}
+
+/// Runs every tool check, prints one line per tool, and stops if any tool
+/// is missing.
+///
+/// # Project context
+/// Runs before any question, so no answers are wasted on a run that cannot
+/// work. HIX never installs anything; it prints the install command.
+///
+/// # Returns
+/// - `Ok(())`: every tool is installed.
+/// - `Err(WizRequiredToolMissing)`: at least one is missing (all are listed first).
+/// - `Err(WizOutputWriteFailed)`.
+fn check_required_tools<W: Write>(wizard_output: &mut W) -> Result<(), HeatmapError> {
+    let mut missing_tool_count: usize = 0;
+    for tool_check in WIZARD_TOOL_CHECKS.iter() {
+        let outcome = run_one_tool_check(tool_check);
+        let label = tool_check.tool_label;
+        let hint = tool_check.install_hint;
+        let line_result = match &outcome {
+            ToolCheckOutcome::Installed { reported_line } => {
+                writeln!(wizard_output, "  {:<16} ok       {}", label, reported_line)
+            }
+            ToolCheckOutcome::NotFound => writeln!(
+                wizard_output,
+                "  {:<16} MISSING  not found; install: {}",
+                label, hint
+            ),
+            ToolCheckOutcome::CouldNotStart => writeln!(
+                wizard_output,
+                "  {:<16} MISSING  could not be started; install or repair: {}",
+                label, hint
+            ),
+            ToolCheckOutcome::ExitedWithFailure => writeln!(
+                wizard_output,
+                "  {:<16} MISSING  ran but reported an error; install or repair: {}",
+                label, hint
+            ),
+            ToolCheckOutcome::RequiredLineMissing => writeln!(
+                wizard_output,
+                "  {:<16} MISSING  not listed as installed; install: {}",
+                label, hint
+            ),
+        };
+        line_result.map_err(wizard_output_error)?;
+        if !matches!(outcome, ToolCheckOutcome::Installed { .. }) {
+            missing_tool_count = missing_tool_count.saturating_add(1);
+        }
+    }
+
+    if missing_tool_count > 0 {
+        writeln!(
+            wizard_output,
+            "\nInstall the missing tools listed above, then start the wizard again."
+        )
+        .map_err(wizard_output_error)?;
+        return Err(HeatmapError::WizRequiredToolMissing);
+    }
+    Ok(())
+}
+
+/// Runs one tool check command directly (no shell; environment unchanged;
+/// stdin closed) and classifies the result.
+fn run_one_tool_check(tool_check: &RequiredToolCheck) -> ToolCheckOutcome {
+    match std::process::Command::new(tool_check.program_name)
+        .args(tool_check.program_arguments)
+        .output()
+    {
+        Ok(command_output) => classify_tool_check_output(
+            tool_check.required_line_prefix,
+            command_output.status.success(),
+            &command_output.stdout,
+        ),
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {
+            ToolCheckOutcome::NotFound
+        }
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "tool check: {} could not be started: {}",
+                tool_check.program_name, _io_error
+            );
+            ToolCheckOutcome::CouldNotStart
+        }
+    }
+}
+
+/// Classifies a finished tool check from its exit status and standard output.
+///
+/// - Failed exit: `ExitedWithFailure`.
+/// - No required prefix: `Installed` with the first output line (or a note
+///   if the tool printed nothing).
+/// - Required prefix: `Installed` with the first line starting with it
+///   (after leading spaces), else `RequiredLineMissing`.
+fn classify_tool_check_output(
+    required_line_prefix: Option<&str>,
+    exited_successfully: bool,
+    stdout_bytes: &[u8],
+) -> ToolCheckOutcome {
+    if !exited_successfully {
+        return ToolCheckOutcome::ExitedWithFailure;
+    }
+    let stdout_text = String::from_utf8_lossy(stdout_bytes);
+    let mut output_lines = stdout_text.lines().take(MAX_TOOL_OUTPUT_LINES);
+    match required_line_prefix {
+        None => {
+            let reported_line = output_lines
+                .next()
+                .map(|line| line.trim().to_string())
+                .unwrap_or_else(|| String::from("(no version text)"));
+            ToolCheckOutcome::Installed { reported_line }
+        }
+        Some(line_prefix) => {
+            match output_lines.find(|line| line.trim_start().starts_with(line_prefix)) {
+                Some(matched_line) => ToolCheckOutcome::Installed {
+                    reported_line: matched_line.trim().to_string(),
+                },
+                None => ToolCheckOutcome::RequiredLineMissing,
+            }
+        }
+    }
+}
+
+/// Prints the `perf_event_paranoid` value and its meaning. Never changes it,
+/// and never stops the wizard (HIX does not use perf yet).
+///
+/// Read or parse failures (716, 717) are absorbed here (Tier 2): the line
+/// says "could not be read" with the code, and the wizard continues.
+///
+/// # Returns
+/// - `Ok(())`, or `Err(WizOutputWriteFailed)`.
+fn report_perf_event_paranoid<W: Write>(wizard_output: &mut W) -> Result<(), HeatmapError> {
+    let paranoid_result = match fs::read(PERF_EVENT_PARANOID_PATH) {
+        Ok(paranoid_bytes) => parse_perf_event_paranoid_text(&paranoid_bytes),
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: read {} failed: {}",
+                HeatmapError::WizPerfParanoidUnreadable.code(),
+                PERF_EVENT_PARANOID_PATH,
+                _io_error
+            );
+            Err(HeatmapError::WizPerfParanoidUnreadable)
+        }
+    };
+    let line_result = match paranoid_result {
+        Ok(value) if value <= PERF_PARANOID_USER_PROFILING_MAX => writeln!(
+            wizard_output,
+            "  {:<16} ok       perf_event_paranoid = {}: perf can profile your own programs",
+            "perf access", value
+        ),
+        Ok(value) => writeln!(
+            wizard_output,
+            "  {:<16} note     perf_event_paranoid = {}: a normal user needs <= {}; HIX does not change it (perf is not used yet)",
+            "perf access", value, PERF_PARANOID_USER_PROFILING_MAX
+        ),
+        Err(error_code) => writeln!(
+            wizard_output,
+            "  {:<16} note     perf_event_paranoid could not be read (HIX code {}); perf is not used yet",
+            "perf access",
+            error_code.code()
+        ),
+    };
+    line_result.map_err(wizard_output_error)
+}
+
+/// Parses the text of `perf_event_paranoid` (one integer, may be negative).
+/// `Err(WizPerfParanoidMalformed)`: not UTF-8 or not an integer.
+fn parse_perf_event_paranoid_text(paranoid_bytes: &[u8]) -> Result<i32, HeatmapError> {
+    let parsed_value = std::str::from_utf8(paranoid_bytes)
+        .ok()
+        .and_then(|paranoid_text| paranoid_text.trim().parse::<i32>().ok());
+    match parsed_value {
+        Some(value) => Ok(value),
+        None => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: perf_event_paranoid is not an integer",
+                HeatmapError::WizPerfParanoidMalformed.code()
+            );
+            Err(HeatmapError::WizPerfParanoidMalformed)
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Answers
+// ----------------------------------------------------------------------------
+
+/// Reads one answer line, without its line ending and surrounding spaces.
+///
+/// # Returns
+/// - `Ok(text)`: may be empty (the person pressed Enter).
+/// - `Err(WizInputEnded)`: end of input before any byte (e.g. Ctrl-D).
+/// - `Err(WizInputReadFailed)`: the read failed.
+/// - `Err(WizAnswerTooLong)`: longer than `MAX_WIZARD_ANSWER_BYTES`.
+/// - `Err(WizAnswerNotUtf8)`.
+fn read_wizard_answer<R: BufRead>(wizard_input: &mut R) -> Result<String, HeatmapError> {
+    let mut answer_bytes: Vec<u8> = Vec::with_capacity(256);
+    let read_limit = (MAX_WIZARD_ANSWER_BYTES as u64).saturating_add(1);
+    let bytes_read = {
+        let mut limited_input = Read::take(&mut *wizard_input, read_limit);
+        match limited_input.read_until(b'\n', &mut answer_bytes) {
+            Ok(count) => count,
+            Err(_io_error) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: answer read failed: {}",
+                    HeatmapError::WizInputReadFailed.code(),
+                    _io_error
+                );
+                return Err(HeatmapError::WizInputReadFailed);
+            }
+        }
+    };
+    if bytes_read == 0 {
+        return Err(HeatmapError::WizInputEnded);
+    }
+    if bytes_read > MAX_WIZARD_ANSWER_BYTES {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: answer longer than {} bytes",
+            HeatmapError::WizAnswerTooLong.code(),
+            MAX_WIZARD_ANSWER_BYTES
+        );
+        return Err(HeatmapError::WizAnswerTooLong);
+    }
+    match String::from_utf8(answer_bytes) {
+        Ok(answer_text) => Ok(answer_text.trim().to_string()),
+        Err(_utf8_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: answer is not UTF-8: {}",
+                HeatmapError::WizAnswerNotUtf8.code(),
+                _utf8_error
+            );
+            Err(HeatmapError::WizAnswerNotUtf8)
+        }
+    }
+}
+
+/// Asks a yes/no question until the answer is `y`, `yes`, `n`, or `no`
+/// (any letter case).
+///
+/// Re-asking has no fixed limit (the agreed exception); end of input or a
+/// read error ends it with a code.
+///
+/// # Returns
+/// - `Ok(true)` for yes, `Ok(false)` for no.
+/// - `Err` from `read_wizard_answer`, or `Err(WizOutputWriteFailed)`.
+fn ask_yes_no<R: BufRead, W: Write>(
+    wizard_input: &mut R,
+    wizard_output: &mut W,
+    question_text: &str,
+) -> Result<bool, HeatmapError> {
+    loop {
+        write!(wizard_output, "{} (y/n): ", question_text).map_err(wizard_output_error)?;
+        wizard_output.flush().map_err(wizard_output_error)?;
+        let answer_text = read_wizard_answer(wizard_input)?.to_ascii_lowercase();
+        match answer_text.as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => writeln!(wizard_output, "  please answer y or n").map_err(wizard_output_error)?,
+        }
+    }
+}
+
+/// Asks a question until `parse_answer` accepts the answer.
+///
+/// An empty answer uses `default_answer` when there is one (shown in
+/// brackets). A rejected answer prints its code and `rule_hint`, then the
+/// question is asked again. `parse_answer` must be validation only, so a
+/// rejection can be fixed by typing a different answer.
+///
+/// Re-asking has no fixed limit (the agreed exception); end of input or a
+/// read error ends it with a code.
+///
+/// # Returns
+/// - `Ok(value)` from `parse_answer`.
+/// - `Err` from `read_wizard_answer`, or `Err(WizOutputWriteFailed)`.
+fn ask_until_valid<R, W, T, F>(
+    wizard_input: &mut R,
+    wizard_output: &mut W,
+    question_text: &str,
+    default_answer: Option<&str>,
+    rule_hint: &str,
+    mut parse_answer: F,
+) -> Result<T, HeatmapError>
+where
+    R: BufRead,
+    W: Write,
+    F: FnMut(&str) -> Result<T, HeatmapError>,
+{
+    loop {
+        let prompt_result = match default_answer {
+            Some(default_text) => write!(wizard_output, "{} [{}]: ", question_text, default_text),
+            None => write!(wizard_output, "{}: ", question_text),
+        };
+        prompt_result.map_err(wizard_output_error)?;
+        wizard_output.flush().map_err(wizard_output_error)?;
+
+        let answer_text = read_wizard_answer(wizard_input)?;
+        let effective_answer: &str = if answer_text.is_empty() {
+            default_answer.unwrap_or("")
+        } else {
+            answer_text.as_str()
+        };
+        match parse_answer(effective_answer) {
+            Ok(value) => return Ok(value),
+            Err(error_code) => writeln!(
+                wizard_output,
+                "  not accepted (HIX code {}): {}",
+                error_code.code(),
+                rule_hint
+            )
+            .map_err(wizard_output_error)?,
+        }
+    }
+}
+
+/// Hint text for the name rule, built from the field's maximum (one source of truth).
+fn name_rule_hint_text(max_bytes: usize) -> String {
+    format!("1-{} characters from A-Z a-z 0-9 _ - .", max_bytes)
+}
+
+// ----------------------------------------------------------------------------
+// Answer rules (validation only; used by `ask_until_valid`)
+// ----------------------------------------------------------------------------
+
+/// Base directory answer: an absolute path to an existing directory.
+/// `Err(TypePathNotAbsolute | WizPathNotADirectory)`.
+fn parse_base_directory_answer(answer_text: &str) -> Result<PathBuf, HeatmapError> {
+    let base_path = AbsolutePath::ap_new(PathBuf::from(answer_text))?;
+    let base_directory = base_path.ap_get()?;
+    if !base_directory.is_dir() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: not a directory: {}",
+            HeatmapError::WizPathNotADirectory.code(),
+            base_directory.display()
+        );
+        return Err(HeatmapError::WizPathNotADirectory);
+    }
+    Ok(base_directory.to_path_buf())
+}
+
+/// Target crate answer: a storable absolute path to a directory holding
+/// `Cargo.toml`. Errors: see `ConfigFieldPath::cfp_new`, plus
+/// `WizCrateHasNoCargoToml`.
+fn parse_target_crate_answer(answer_text: &str) -> Result<ConfigFieldPath, HeatmapError> {
+    let crate_path = ConfigFieldPath::cfp_new(Path::new(answer_text))?;
+    let cargo_manifest_path = Path::new(crate_path.cfp_get()?).join("Cargo.toml");
+    if !cargo_manifest_path.is_file() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: no Cargo.toml at {}",
+            HeatmapError::WizCrateHasNoCargoToml.code(),
+            cargo_manifest_path.display()
+        );
+        return Err(HeatmapError::WizCrateHasNoCargoToml);
+    }
+    Ok(crate_path)
+}
+
+/// New scenario answer: a valid scenario name whose config file does not
+/// exist yet in `config_directory` (one config per scenario name).
+/// `Err(TypeScenarioNameInvalid | WizScenarioConfigExists)`.
+fn parse_new_scenario_answer(
+    answer_text: &str,
+    config_directory: &Path,
+) -> Result<ScenarioName, HeatmapError> {
+    let scenario_name = ScenarioName::scn_new(answer_text)?;
+    let config_file_path = config_directory.join(config_file_name_for_scenario(&scenario_name)?);
+    if fs::symlink_metadata(&config_file_path).is_ok() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: config exists: {}",
+            HeatmapError::WizScenarioConfigExists.code(),
+            config_file_path.display()
+        );
+        return Err(HeatmapError::WizScenarioConfigExists);
+    }
+    Ok(scenario_name)
+}
+
+/// Optional work-unit name answer: empty means none.
+/// `Err(TypeWorkUnitNameInvalid)` for a non-empty invalid name.
+fn parse_optional_work_unit_name_answer(
+    answer_text: &str,
+) -> Result<Option<WorkUnitName>, HeatmapError> {
+    if answer_text.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(WorkUnitName::wun_new(answer_text)?))
+}
+
+/// Config choice answer: `n` (new config) or a listed number (1-based).
+/// `Ok(None)` for `n`; `Ok(Some(file_name))` for a number;
+/// `Err(WizConfigChoiceInvalid)` otherwise.
+fn parse_config_choice_answer(
+    answer_text: &str,
+    config_file_names: &[String],
+) -> Result<Option<String>, HeatmapError> {
+    if answer_text.eq_ignore_ascii_case("n") {
+        return Ok(None);
+    }
+    let chosen_name = answer_text
+        .parse::<usize>()
+        .ok()
+        .and_then(|list_number| list_number.checked_sub(1))
+        .and_then(|list_index| config_file_names.get(list_index));
+    match chosen_name {
+        Some(file_name) => Ok(Some(file_name.clone())),
+        None => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: config choice {:?} not in 1..={} or n",
+                HeatmapError::WizConfigChoiceInvalid.code(),
+                answer_text,
+                config_file_names.len()
+            );
+            Err(HeatmapError::WizConfigChoiceInvalid)
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Directories, config files, run numbers
+// ----------------------------------------------------------------------------
+
+/// True if `file_name` is `hixtoml_<valid scenario name>.toml`.
+fn is_config_file_name(file_name: &str) -> bool {
+    file_name
+        .strip_prefix(CONFIG_FILE_NAME_PREFIX)
+        .and_then(|rest| rest.strip_suffix(CONFIG_FILE_NAME_SUFFIX))
+        .map(|scenario_text| is_valid_metadata_text(scenario_text, MAX_SCENARIO_NAME_BYTES))
+        .unwrap_or(false)
+}
+
+/// Run number of a folder named `run_<digits>_...`, else `None`.
+///
+/// Any number of digits is accepted (`run_5_x`, `run_0005_x`). A number too
+/// large for u32 is returned as `u32::MAX`, so it counts as beyond
+/// `MAX_RUN_NUMBER` instead of being silently ignored.
+fn run_number_from_folder_name(folder_name: &str) -> Option<u32> {
+    let after_prefix = folder_name.strip_prefix(RUN_FOLDER_NAME_PREFIX)?;
+    let digit_count = after_prefix
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digit_count == 0 {
+        return None;
+    }
+    let (digit_text, rest) = after_prefix.split_at_checked(digit_count)?;
+    if !rest.starts_with('_') {
+        return None;
+    }
+    Some(digit_text.parse::<u32>().unwrap_or(u32::MAX))
+}
+
+/// Next run number: highest `run_NNN_` number in `modeling_data_directory`
+/// plus 1 (1 if there is none). Names that do not match are ignored.
+///
+/// # Returns
+/// - `Ok(number)` in 1..=`MAX_RUN_NUMBER`.
+/// - `Err(WizModelingDataListFailed | WizModelingDataEntryFailed)`.
+/// - `Err(WizTooManyModelingDataEntries)`: more than `MAX_MODELING_DATA_ENTRIES`.
+/// - `Err(WizRunNumberExhausted)`: the next number would exceed `MAX_RUN_NUMBER`.
+fn next_run_number(modeling_data_directory: &Path) -> Result<u32, HeatmapError> {
+    let directory_entries = match fs::read_dir(modeling_data_directory) {
+        Ok(entries) => entries,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: list {} failed: {}",
+                HeatmapError::WizModelingDataListFailed.code(),
+                modeling_data_directory.display(),
+                _io_error
+            );
+            return Err(HeatmapError::WizModelingDataListFailed);
+        }
+    };
+
+    let mut highest_run_number: u32 = 0;
+    for (entry_index, entry_result) in directory_entries.enumerate() {
+        if entry_index >= MAX_MODELING_DATA_ENTRIES {
+            return Err(HeatmapError::WizTooManyModelingDataEntries);
+        }
+        let directory_entry = match entry_result {
+            Ok(entry) => entry,
+            Err(_io_error) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: modeling_data entry failed: {}",
+                    HeatmapError::WizModelingDataEntryFailed.code(),
+                    _io_error
+                );
+                return Err(HeatmapError::WizModelingDataEntryFailed);
+            }
+        };
+        let entry_name = directory_entry.file_name();
+        if let Some(run_number) = entry_name.to_str().and_then(run_number_from_folder_name) {
+            highest_run_number = highest_run_number.max(run_number);
+        }
+    }
+
+    match highest_run_number.checked_add(1) {
+        Some(next_number) if next_number <= MAX_RUN_NUMBER => Ok(next_number),
+        _ => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: highest run number {} leaves no number <= {}",
+                HeatmapError::WizRunNumberExhausted.code(),
+                highest_run_number,
+                MAX_RUN_NUMBER
+            );
+            Err(HeatmapError::WizRunNumberExhausted)
+        }
+    }
+}
+
+/// Run folder name `run_NNN_<scenario>` (at least 3 digits), as a `RunLabel`
+/// so Stage 2 can pass it to the analysis as `--run-label`.
+/// Errors: `TypeScenarioNameCorrupted`, `TypeRunLabelInvalid`.
+fn run_folder_name_for(
+    run_number: u32,
+    scenario_name: &ScenarioName,
+) -> Result<RunLabel, HeatmapError> {
+    let folder_name = format!(
+        "{}{:03}_{}",
+        RUN_FOLDER_NAME_PREFIX,
+        run_number,
+        scenario_name.scn_get()?
+    );
+    RunLabel::rl_new(&folder_name)
+}
+
+/// Lists config file names in `config_directory`, sorted.
+///
+/// # Returns
+/// - `Ok(names)`: names that pass `is_config_file_name`.
+/// - `Err(WizConfigListFailed | WizConfigEntryFailed)`.
+/// - `Err(WizTooManyConfigDirectoryEntries)`: more than `MAX_CONFIG_DIRECTORY_ENTRIES`.
+fn list_config_file_names(config_directory: &Path) -> Result<Vec<String>, HeatmapError> {
+    let directory_entries = match fs::read_dir(config_directory) {
+        Ok(entries) => entries,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: list {} failed: {}",
+                HeatmapError::WizConfigListFailed.code(),
+                config_directory.display(),
+                _io_error
+            );
+            return Err(HeatmapError::WizConfigListFailed);
+        }
+    };
+
+    let mut config_file_names: Vec<String> = Vec::new();
+    for (entry_index, entry_result) in directory_entries.enumerate() {
+        if entry_index >= MAX_CONFIG_DIRECTORY_ENTRIES {
+            return Err(HeatmapError::WizTooManyConfigDirectoryEntries);
+        }
+        let directory_entry = match entry_result {
+            Ok(entry) => entry,
+            Err(_io_error) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: config_files entry failed: {}",
+                    HeatmapError::WizConfigEntryFailed.code(),
+                    _io_error
+                );
+                return Err(HeatmapError::WizConfigEntryFailed);
+            }
+        };
+        let entry_name = directory_entry.file_name();
+        if let Some(name_text) = entry_name.to_str() {
+            if is_config_file_name(name_text) {
+                config_file_names.push(name_text.to_string());
+            }
+        }
+    }
+    config_file_names.sort();
+    Ok(config_file_names)
+}
+
+/// Makes sure `modeling_data/` and `config_files/` exist in `base_directory`,
+/// offering to create missing ones.
+///
+/// Each missing directory is created with `create_dir` (never
+/// `create_dir_all`: the base directory itself must already exist).
+///
+/// # Returns
+/// - `Ok(())`: both exist (now).
+/// - `Err(WizBaseEntryNotADirectory)`: one of the names exists as a non-directory.
+/// - `Err(WizDirectoryCheckFailed)`: existence could not be determined.
+/// - `Err(WizUserDeclinedDirectoryCreation)`: the person answered n.
+/// - `Err(WizDirectoryCreateFailed)`.
+/// - `Err` from the answer functions.
+fn ensure_wizard_directories<R: BufRead, W: Write>(
+    wizard_input: &mut R,
+    wizard_output: &mut W,
+    base_directory: &Path,
+) -> Result<(), HeatmapError> {
+    let required_directories: [PathBuf; 2] = [
+        base_directory.join(MODELING_DATA_DIRECTORY_NAME),
+        base_directory.join(CONFIG_FILES_DIRECTORY_NAME),
+    ];
+    let mut missing_directories: Vec<&PathBuf> = Vec::with_capacity(required_directories.len());
+    for required_directory in required_directories.iter() {
+        match fs::metadata(required_directory) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_not_a_directory) => {
+                writeln!(
+                    wizard_output,
+                    "  {} exists but is not a directory",
+                    required_directory.display()
+                )
+                .map_err(wizard_output_error)?;
+                return Err(HeatmapError::WizBaseEntryNotADirectory);
+            }
+            Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {
+                missing_directories.push(required_directory);
+            }
+            Err(_io_error) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "HIX-{}: check {} failed: {}",
+                    HeatmapError::WizDirectoryCheckFailed.code(),
+                    required_directory.display(),
+                    _io_error
+                );
+                return Err(HeatmapError::WizDirectoryCheckFailed);
+            }
+        }
+    }
+    if missing_directories.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(wizard_output, "These directories do not exist yet:").map_err(wizard_output_error)?;
+    for missing_directory in missing_directories.iter() {
+        writeln!(wizard_output, "  {}", missing_directory.display())
+            .map_err(wizard_output_error)?;
+    }
+    if !ask_yes_no(wizard_input, wizard_output, "Create them?")? {
+        writeln!(wizard_output, "Stopped. Nothing was created.").map_err(wizard_output_error)?;
+        return Err(HeatmapError::WizUserDeclinedDirectoryCreation);
+    }
+    for missing_directory in missing_directories.iter() {
+        if let Err(_io_error) = fs::create_dir(missing_directory) {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: create {} failed: {}",
+                HeatmapError::WizDirectoryCreateFailed.code(),
+                missing_directory.display(),
+                _io_error
+            );
+            return Err(HeatmapError::WizDirectoryCreateFailed);
+        }
+        writeln!(wizard_output, "  created {}", missing_directory.display())
+            .map_err(wizard_output_error)?;
+    }
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Dialog
+// ----------------------------------------------------------------------------
+
+/// The question-and-answer part of Stage 1 (everything after the checks).
+///
+/// # Steps
+/// 1. Base directory: the current directory, or a typed absolute path.
+/// 2. Make sure `modeling_data/` and `config_files/` exist (offer to create).
+/// 3. Use a listed config file, or create a new one.
+/// 4. Next run folder name, from the config's `modeling_data_path`.
+/// 5. Print the planned run.
+///
+/// # Arguments
+/// - `current_directory`: offered as the base directory (tests pass a temp dir).
+///
+/// # Returns
+/// - `Ok(())` after printing the planned run.
+/// - `Err`: the first stop condition's code.
+fn run_wizard_setup_dialog<R: BufRead, W: Write>(
+    wizard_input: &mut R,
+    wizard_output: &mut W,
+    current_directory: &Path,
+) -> Result<(), HeatmapError> {
+    writeln!(
+        wizard_output,
+        "\n[HIX base directory]  (holds {}/ and {}/)",
+        MODELING_DATA_DIRECTORY_NAME, CONFIG_FILES_DIRECTORY_NAME
+    )
+    .map_err(wizard_output_error)?;
+    let use_current_directory = ask_yes_no(
+        wizard_input,
+        wizard_output,
+        &format!(
+            "Use the current directory {} ?",
+            current_directory.display()
+        ),
+    )?;
+    let base_directory = if use_current_directory {
+        current_directory.to_path_buf()
+    } else {
+        ask_until_valid(
+            wizard_input,
+            wizard_output,
+            "Absolute path of the HIX base directory",
+            None,
+            "an existing directory, given as an absolute path",
+            parse_base_directory_answer,
+        )?
+    };
+
+    ensure_wizard_directories(wizard_input, wizard_output, &base_directory)?;
+    let modeling_data_directory = base_directory.join(MODELING_DATA_DIRECTORY_NAME);
+    let config_directory = base_directory.join(CONFIG_FILES_DIRECTORY_NAME);
+
+    let config = choose_or_create_config(
+        wizard_input,
+        wizard_output,
+        &config_directory,
+        &modeling_data_directory,
+    )?;
+
+    let run_modeling_data_directory = PathBuf::from(config.modeling_data_path.cfp_get()?);
+    if run_modeling_data_directory != modeling_data_directory {
+        writeln!(
+            wizard_output,
+            "  note: this config keeps its runs in {}",
+            run_modeling_data_directory.display()
+        )
+        .map_err(wizard_output_error)?;
+    }
+    let run_number = match next_run_number(&run_modeling_data_directory) {
+        Ok(number) => number,
+        Err(error_code) => {
+            writeln!(
+                wizard_output,
+                "Could not find the next run number in {} (HIX code {}).",
+                run_modeling_data_directory.display(),
+                error_code.code()
+            )
+            .map_err(wizard_output_error)?;
+            return Err(error_code);
+        }
+    };
+    let run_folder_name = run_folder_name_for(run_number, &config.scenario_name)?;
+    write_planned_run_steps(
+        wizard_output,
+        &config,
+        &run_folder_name,
+        &run_modeling_data_directory,
+    )
+}
+
+/// Offers the listed config files by number, or creates a new config.
+///
+/// # Returns
+/// - `Ok(HixConfig)`: loaded (and fully checked by `load_config_file`) or newly written.
+/// - `Err` from listing, loading (the code is printed first), or `create_new_config`.
+fn choose_or_create_config<R: BufRead, W: Write>(
+    wizard_input: &mut R,
+    wizard_output: &mut W,
+    config_directory: &Path,
+    modeling_data_directory: &Path,
+) -> Result<HixConfig, HeatmapError> {
+    let config_file_names = list_config_file_names(config_directory)?;
+    if config_file_names.is_empty() {
+        writeln!(
+            wizard_output,
+            "\nNo config files in {} yet: creating a new one.",
+            config_directory.display()
+        )
+        .map_err(wizard_output_error)?;
+        return create_new_config(
+            wizard_input,
+            wizard_output,
+            config_directory,
+            modeling_data_directory,
+        );
+    }
+
+    writeln!(
+        wizard_output,
+        "\n[config files in {}]",
+        config_directory.display()
+    )
+    .map_err(wizard_output_error)?;
+    for (list_index, file_name) in config_file_names.iter().enumerate() {
+        writeln!(
+            wizard_output,
+            "  {:>3}  {}",
+            list_index.saturating_add(1),
+            file_name
+        )
+        .map_err(wizard_output_error)?;
+    }
+    let config_choice = ask_until_valid(
+        wizard_input,
+        wizard_output,
+        "Number of the config to use, or n for a new config",
+        None,
+        "a number from the list, or n",
+        |answer_text| parse_config_choice_answer(answer_text, &config_file_names),
+    )?;
+
+    let chosen_file_name = match config_choice {
+        Some(file_name) => file_name,
+        None => {
+            return create_new_config(
+                wizard_input,
+                wizard_output,
+                config_directory,
+                modeling_data_directory,
+            );
+        }
+    };
+    let config_file_path = AbsolutePath::ap_new(config_directory.join(&chosen_file_name))?;
+    match load_config_file(&config_file_path) {
+        Ok(config) => {
+            writeln!(wizard_output, "  using {}", chosen_file_name).map_err(wizard_output_error)?;
+            Ok(config)
+        }
+        Err(error_code) => {
+            writeln!(
+                wizard_output,
+                "Config file {} could not be loaded (HIX code {}). Fix or move it, or create a new config.",
+                chosen_file_name,
+                error_code.code()
+            )
+            .map_err(wizard_output_error)?;
+            Err(error_code)
+        }
+    }
+}
+
+/// Asks the new-config questions, shows the file text, and writes it after `y`.
+///
+/// The file is written with `write_new_config_file` (create-new, read back
+/// and compared). Its `modeling_data_path` is `<base>/modeling_data`.
+///
+/// # Returns
+/// - `Ok(HixConfig)`: written and verified.
+/// - `Err(WizUserDeclinedConfigWrite)`: the person answered n (nothing written).
+/// - `Err` from the path check of `modeling_data_directory` (817, 818, 837),
+///   the answer functions, rendering, or `write_new_config_file`.
+fn create_new_config<R: BufRead, W: Write>(
+    wizard_input: &mut R,
+    wizard_output: &mut W,
+    config_directory: &Path,
+    modeling_data_directory: &Path,
+) -> Result<HixConfig, HeatmapError> {
+    writeln!(wizard_output, "\n[new config]").map_err(wizard_output_error)?;
+    let modeling_data_path = ConfigFieldPath::cfp_new(modeling_data_directory)?;
+
+    let crate_path_hint = format!(
+        "an absolute path to a directory containing Cargo.toml; at most {} bytes; no \" or \\",
+        MAX_CONFIG_PATH_BYTES
+    );
+    let target_crate_path = ask_until_valid(
+        wizard_input,
+        wizard_output,
+        "Absolute path of the crate to analyze (the directory with its Cargo.toml)",
+        None,
+        &crate_path_hint,
+        parse_target_crate_answer,
+    )?;
+    let target_binary_name = ask_until_valid(
+        wizard_input,
+        wizard_output,
+        "Binary to run (the name given to cargo --bin, e.g. pumpkin)",
+        None,
+        &name_rule_hint_text(MAX_CARGO_BINARY_NAME_BYTES),
+        CargoBinaryName::cbn_new,
+    )?;
+    let scenario_hint = format!(
+        "{}; not already used by a config file",
+        name_rule_hint_text(MAX_SCENARIO_NAME_BYTES)
+    );
+    let scenario_name = ask_until_valid(
+        wizard_input,
+        wizard_output,
+        "Scenario name (names run folders and this config, e.g. pumpkin_world_spawn)",
+        None,
+        &scenario_hint,
+        |answer_text| parse_new_scenario_answer(answer_text, config_directory),
+    )?;
+    let analysis_purpose = ask_until_valid(
+        wizard_input,
+        wizard_output,
+        "Analysis purpose (names the analysis folder)",
+        Some(DEFAULT_ANALYSIS_PURPOSE),
+        &name_rule_hint_text(MAX_ANALYSIS_PURPOSE_BYTES),
+        AnalysisPurpose::apu_new,
+    )?;
+    let default_top_n_text = DEFAULT_TOP_N.to_string();
+    let top_n_hint = format!("a whole number from 1 to {}", MAX_TOP_N);
+    let top_n = ask_until_valid(
+        wizard_input,
+        wizard_output,
+        "Rows per Top-N table",
+        Some(&default_top_n_text),
+        &top_n_hint,
+        parse_config_top_n,
+    )?;
+    let work_unit_name = ask_until_valid(
+        wizard_input,
+        wizard_output,
+        "Work-unit name (e.g. chunks_generated; empty for none)",
+        None,
+        &name_rule_hint_text(MAX_WORK_UNIT_NAME_BYTES),
+        parse_optional_work_unit_name_answer,
+    )?;
+    let demangle_outputs = ask_yes_no(
+        wizard_input,
+        wizard_output,
+        "Also write demangled copies of the report and TSV (rustfilt)?",
+    )?;
+
+    let config = HixConfig {
+        target_crate_path,
+        target_binary_name,
+        modeling_data_path,
+        scenario_name,
+        analysis_purpose,
+        top_n,
+        work_unit_name,
+        demangle_outputs,
+    };
+    let config_file_name = config_file_name_for_scenario(&config.scenario_name)?;
+    let config_file_path = AbsolutePath::ap_new(config_directory.join(&config_file_name))?;
+
+    writeln!(
+        wizard_output,
+        "\nThe config file {} will contain:\n",
+        config_file_path.ap_get()?.display()
+    )
+    .map_err(wizard_output_error)?;
+    let mut render_buffer: [u8; CONFIG_FILE_MAX_BYTES] = [0u8; CONFIG_FILE_MAX_BYTES];
+    let rendered_bytes = render_config_file_text(&config, &mut render_buffer)?;
+    wizard_output
+        .write_all(rendered_bytes)
+        .map_err(wizard_output_error)?;
+    writeln!(wizard_output).map_err(wizard_output_error)?;
+
+    if !ask_yes_no(wizard_input, wizard_output, "Write this config file?")? {
+        writeln!(wizard_output, "Stopped. No config file was written.")
+            .map_err(wizard_output_error)?;
+        return Err(HeatmapError::WizUserDeclinedConfigWrite);
+    }
+    write_new_config_file(&config_file_path, &config)?;
+    writeln!(wizard_output, "  written and checked: {}", config_file_name)
+        .map_err(wizard_output_error)?;
+    Ok(config)
+}
+
+/// Prints the planned run as exact commands with absolute paths.
+///
+/// Stage 1 runs none of them. They are what Stage 2 will run, in this order,
+/// and a person can also type them by hand.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(WizOutputWriteFailed)`, or a field recheck code.
+fn write_planned_run_steps<W: Write>(
+    wizard_output: &mut W,
+    config: &HixConfig,
+    run_folder_name: &RunLabel,
+    modeling_data_directory: &Path,
+) -> Result<(), HeatmapError> {
+    let run_folder_text = run_folder_name.rl_get()?;
+    let run_folder_path = modeling_data_directory.join(run_folder_text);
+    let lcov_file_path = run_folder_path.join(format!("{}.lcov", run_folder_text));
+    let analysis_folder_name = format!(
+        "{}{:03}_{}",
+        ANALYSIS_FOLDER_NAME_PREFIX,
+        FIRST_ANALYSIS_NUMBER,
+        config.analysis_purpose.apu_get()?
+    );
+    let analysis_folder_path = run_folder_path.join(&analysis_folder_name);
+
+    writeln!(
+        wizard_output,
+        "\n[planned run]  (nothing below has been run; running is the next wizard stage)"
+    )
+    .map_err(wizard_output_error)?;
+    writeln!(
+        wizard_output,
+        "  run folder (HIX creates it): {}",
+        run_folder_path.display()
+    )
+    .map_err(wizard_output_error)?;
+    writeln!(
+        wizard_output,
+        "  in directory {}:",
+        config.target_crate_path.cfp_get()?
+    )
+    .map_err(wizard_output_error)?;
+    writeln!(wizard_output, "    cargo llvm-cov clean --workspace").map_err(wizard_output_error)?;
+    writeln!(
+        wizard_output,
+        "    cargo llvm-cov run --release --no-report --bin {}",
+        config.target_binary_name.cbn_get()?
+    )
+    .map_err(wizard_output_error)?;
+    writeln!(
+        wizard_output,
+        "      (use the program, then stop it with its own command, e.g. Pumpkin: stop; not Ctrl-C)"
+    )
+    .map_err(wizard_output_error)?;
+    writeln!(
+        wizard_output,
+        "    cargo llvm-cov report --release --lcov --output-path {}",
+        lcov_file_path.display()
+    )
+    .map_err(wizard_output_error)?;
+    write!(
+        wizard_output,
+        "  analysis:\n    hix --lcov {} --out-dir {} --top-n {} --run-label {}",
+        lcov_file_path.display(),
+        analysis_folder_path.display(),
+        config.top_n.tnc_get()?,
+        run_folder_text
+    )
+    .map_err(wizard_output_error)?;
+    if let Some(work_unit_name) = &config.work_unit_name {
+        write!(
+            wizard_output,
+            " --work-units <count, entered after the run> --work-unit-name {}",
+            work_unit_name.wun_get()?
+        )
+        .map_err(wizard_output_error)?;
+    }
+    writeln!(wizard_output).map_err(wizard_output_error)?;
+    if config.demangle_outputs {
+        writeln!(
+            wizard_output,
+            "  demangle:\n    rustfilt < {} > {}\n    rustfilt < {} > {}",
+            analysis_folder_path.join(REPORT_FILE_NAME).display(),
+            analysis_folder_path
+                .join(DEMANGLED_REPORT_FILE_NAME)
+                .display(),
+            analysis_folder_path.join(SITES_TSV_FILE_NAME).display(),
+            analysis_folder_path
+                .join(DEMANGLED_SITES_TSV_FILE_NAME)
+                .display()
+        )
+        .map_err(wizard_output_error)?;
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Tests (test mode only)
 // ============================================================================
 
 /// Unit tests (compiled only under `cargo test`).
 ///
-/// All tests use in-memory input (`std::io::Cursor`) and synthetic sites, so
-/// they touch no files except `std::env::temp_dir()` path *values* (never
-/// created or opened). `unwrap`/`assert!` are allowed here (test mode).
+/// Most tests use in-memory input (`std::io::Cursor`) and synthetic sites.
+/// Tests of output safety (codes 510-515), of the loop scan on real files,
+/// and of config files create uniquely named entries under
+/// `std::env::temp_dir()` and remove them at the end; if such a test fails
+/// mid-way, its temp entry may remain (harmless, unique name). Other
+/// temp-dir paths are used only as path values (never created or opened).
 ///
 /// Test names: `<area>_<function>_<condition>[_with_code_<nnn>]`.
 /// Areas: `cli`, `type`, `lcov`, `src` (loop scan), `ana` (analysis),
-/// `rpt` (report output), `err` (error-code policy), `guard`
-/// (single-source-of-truth checks on the source text itself).
-///
-/// Most tests use in-memory input (`std::io::Cursor`) and synthetic sites.
-/// Output-safety tests (`rpt_*` for codes 510–515) create and remove
-/// uniquely named entries under `std::env::temp_dir()`; if such a test
-/// fails mid-way, its temp entry may remain (harmless, unique name).
-/// `unwrap`/`assert!` are allowed here (test mode).
+/// `rpt` (report output), `cfg` (config files), `err` (error-code policy),
+/// `guard` (single-source-of-truth checks on the source text itself).
+/// `unwrap`/`assert!`/indexing are allowed here (test mode).
 #[cfg(test)]
 mod hix_heatmap_indices_for_compute_tests {
     use super::*;
@@ -8449,21 +10041,22 @@ fn idle() {}\n";
     }
 
     // ------------------------------------------------------------------
-    // HIX config files
+    // HIX config files - Cargo Tests
     // ------------------------------------------------------------------
 
     /// A complete, valid config. Paths need not exist: config files store
-    /// paths; they do not check them.
+    /// paths as text; they do not check them on disk.
     fn sample_config(work_unit_name: Option<&str>) -> HixConfig {
         HixConfig {
-            target_crate_path: ConfigPath::cp_new(Path::new("/home/user/code/Pumpkin")).unwrap(),
-            target_binary_name: CargoBinaryName::ntk_new("pumpkin").unwrap(),
-            modeling_data_path: ConfigPath::cp_new(Path::new(
+            target_crate_path: ConfigFieldPath::cfp_new(Path::new("/home/user/code/Pumpkin"))
+                .unwrap(),
+            target_binary_name: CargoBinaryName::cbn_new("pumpkin").unwrap(),
+            modeling_data_path: ConfigFieldPath::cfp_new(Path::new(
                 "/home/user/code/hix_heatmap_indices_for_compute/modeling_data",
             ))
             .unwrap(),
-            scenario_name: ScenarioName::ntk_new("pumpkin_world_spawn").unwrap(),
-            analysis_purpose: AnalysisPurpose::ntk_new("count_baseline").unwrap(),
+            scenario_name: ScenarioName::scn_new("pumpkin_world_spawn").unwrap(),
+            analysis_purpose: AnalysisPurpose::apu_new("count_baseline").unwrap(),
             top_n: TopNCount::tnc_new(15).unwrap(),
             work_unit_name: work_unit_name.map(|name| WorkUnitName::wun_new(name).unwrap()),
             demangle_outputs: true,
@@ -8477,13 +10070,14 @@ fn idle() {}\n";
         String::from_utf8(rendered_bytes.to_vec()).unwrap()
     }
 
-    /// Writes `config_text` to `hix_test.toml` in a new unique temp directory.
-    /// Returns the directory (for cleanup) and the file path.
-    fn write_temp_config_text(test_label: &str, config_text: &str) -> (PathBuf, AbsolutePath) {
+    /// Writes `config_bytes` to `hixtoml_test.toml` in a new unique temp
+    /// directory. Returns the directory (for cleanup) and the file path.
+    /// Takes bytes, so tests can also write non-UTF-8 content.
+    fn write_temp_config_bytes(test_label: &str, config_bytes: &[u8]) -> (PathBuf, AbsolutePath) {
         let directory = unique_temp_path(test_label);
         fs::create_dir(&directory).unwrap();
-        let file_path = directory.join("hix_test.toml");
-        fs::write(&file_path, config_text).unwrap();
+        let file_path = directory.join("hixtoml_test.toml");
+        fs::write(&file_path, config_bytes).unwrap();
         (directory, AbsolutePath::ap_new(file_path).unwrap())
     }
 
@@ -8493,73 +10087,127 @@ fn idle() {}\n";
         fs::remove_dir(directory).unwrap();
     }
 
-    /// Each name kind rejects text outside its rule with its own code, so a
-    /// failure names the field: empty, a space, a slash, and one byte over
-    /// the kind's maximum. A name at exactly the maximum is accepted.
+    /// Scenario names: empty, space, slash, and quote are refused with 164;
+    /// exactly the maximum length is accepted, one byte more is refused; a
+    /// valid name reads back unchanged.
     #[test]
-    fn type_name_text_new_invalid_with_codes_164_166_168() {
-        for bad_text in ["", "world spawn", "world/spawn"] {
+    fn type_scenario_name_scn_new_invalid_with_code_164() {
+        for bad_text in ["", "world spawn", "world/spawn", "world\"spawn"] {
+            let error = ScenarioName::scn_new(bad_text).unwrap_err();
             assert_eq!(
-                ScenarioName::ntk_new(bad_text).unwrap_err(),
-                HeatmapError::TypeScenarioNameInvalid
+                error,
+                HeatmapError::TypeScenarioNameInvalid,
+                "{:?}",
+                bad_text
             );
-            assert_eq!(
-                CargoBinaryName::ntk_new(bad_text).unwrap_err(),
-                HeatmapError::TypeCargoBinaryNameInvalid
-            );
-            assert_eq!(
-                AnalysisPurpose::ntk_new(bad_text).unwrap_err(),
-                HeatmapError::TypeAnalysisPurposeInvalid
-            );
+            assert_eq!(error.code(), 164);
         }
-        assert_eq!(HeatmapError::TypeScenarioNameInvalid.code(), 164);
-        assert_eq!(HeatmapError::TypeCargoBinaryNameInvalid.code(), 166);
-        assert_eq!(HeatmapError::TypeAnalysisPurposeInvalid.code(), 168);
-
-        assert!(ScenarioName::ntk_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES)).is_ok());
+        assert!(ScenarioName::scn_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES)).is_ok());
         assert_eq!(
-            ScenarioName::ntk_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES + 1)).unwrap_err(),
+            ScenarioName::scn_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES + 1)).unwrap_err(),
             HeatmapError::TypeScenarioNameInvalid
         );
         assert_eq!(
-            CargoBinaryName::ntk_new(&"b".repeat(MAX_CARGO_BINARY_NAME_BYTES + 1)).unwrap_err(),
+            ScenarioName::scn_new("pumpkin_world_spawn")
+                .unwrap()
+                .scn_get()
+                .unwrap(),
+            "pumpkin_world_spawn"
+        );
+    }
+
+    /// Cargo binary names: same rule, own maximum, own code 166.
+    #[test]
+    fn type_cargo_binary_name_cbn_new_invalid_with_code_166() {
+        for bad_text in ["", "pump kin", "pump/kin"] {
+            let error = CargoBinaryName::cbn_new(bad_text).unwrap_err();
+            assert_eq!(
+                error,
+                HeatmapError::TypeCargoBinaryNameInvalid,
+                "{:?}",
+                bad_text
+            );
+            assert_eq!(error.code(), 166);
+        }
+        assert!(CargoBinaryName::cbn_new(&"b".repeat(MAX_CARGO_BINARY_NAME_BYTES)).is_ok());
+        assert_eq!(
+            CargoBinaryName::cbn_new(&"b".repeat(MAX_CARGO_BINARY_NAME_BYTES + 1)).unwrap_err(),
             HeatmapError::TypeCargoBinaryNameInvalid
         );
         assert_eq!(
-            AnalysisPurpose::ntk_new(&"p".repeat(MAX_ANALYSIS_PURPOSE_BYTES + 1)).unwrap_err(),
+            CargoBinaryName::cbn_new("pumpkin")
+                .unwrap()
+                .cbn_get()
+                .unwrap(),
+            "pumpkin"
+        );
+    }
+
+    /// Analysis purposes: same rule, own maximum, own code 168.
+    #[test]
+    fn type_analysis_purpose_apu_new_invalid_with_code_168() {
+        for bad_text in ["", "count baseline", "count/baseline"] {
+            let error = AnalysisPurpose::apu_new(bad_text).unwrap_err();
+            assert_eq!(
+                error,
+                HeatmapError::TypeAnalysisPurposeInvalid,
+                "{:?}",
+                bad_text
+            );
+            assert_eq!(error.code(), 168);
+        }
+        assert!(AnalysisPurpose::apu_new(&"p".repeat(MAX_ANALYSIS_PURPOSE_BYTES)).is_ok());
+        assert_eq!(
+            AnalysisPurpose::apu_new(&"p".repeat(MAX_ANALYSIS_PURPOSE_BYTES + 1)).unwrap_err(),
             HeatmapError::TypeAnalysisPurposeInvalid
+        );
+        assert_eq!(
+            AnalysisPurpose::apu_new("count_baseline")
+                .unwrap()
+                .apu_get()
+                .unwrap(),
+            "count_baseline"
         );
     }
 
     /// Invariant catch: names corrupted after construction (built directly,
-    /// bypassing `new`) are rejected by `get` with each kind's own code.
+    /// bypassing the constructors, simulating memory corruption) are refused
+    /// by each type's accessor with its own code.
     #[test]
-    fn type_name_text_get_corrupted_with_codes_165_167_169() {
-        let scenario: ScenarioName = NameText {
-            name_text: String::from("bad name"),
-            kind: PhantomData,
+    fn type_name_types_get_corrupted_with_codes_165_167_169() {
+        let scenario = ScenarioName {
+            scenario_name_text: String::from("bad name"),
         };
-        let binary: CargoBinaryName = NameText {
-            name_text: String::new(),
-            kind: PhantomData,
+        let binary = CargoBinaryName {
+            cargo_binary_name_text: String::new(),
         };
-        let purpose: AnalysisPurpose = NameText {
-            name_text: String::from("bad/purpose"),
-            kind: PhantomData,
+        let purpose = AnalysisPurpose {
+            analysis_purpose_text: String::from("bad/purpose"),
         };
-        assert_eq!(scenario.ntk_get().unwrap_err().code(), 165);
-        assert_eq!(binary.ntk_get().unwrap_err().code(), 167);
-        assert_eq!(purpose.ntk_get().unwrap_err().code(), 169);
+        assert_eq!(
+            scenario.scn_get().unwrap_err(),
+            HeatmapError::TypeScenarioNameCorrupted
+        );
+        assert_eq!(HeatmapError::TypeScenarioNameCorrupted.code(), 165);
+        assert_eq!(
+            binary.cbn_get().unwrap_err(),
+            HeatmapError::TypeCargoBinaryNameCorrupted
+        );
+        assert_eq!(HeatmapError::TypeCargoBinaryNameCorrupted.code(), 167);
+        assert_eq!(
+            purpose.apu_get().unwrap_err(),
+            HeatmapError::TypeAnalysisPurposeCorrupted
+        );
+        assert_eq!(HeatmapError::TypeAnalysisPurposeCorrupted.code(), 169);
     }
 
-    /// Path field values: relative paths are refused (817). Non-UTF-8 paths,
-    /// quotes, backslashes, control bytes, and over-long paths are refused
-    /// (818), because they could not be written and read back unchanged. The
-    /// longest storable path is accepted, and the accessor returns the path's
-    /// own characters.
+    /// Path field values: relative paths are refused (817); quotes,
+    /// backslashes, control bytes, empty, and over-long text are refused
+    /// (818); non-UTF-8 paths are refused (837). The longest storable path is
+    /// accepted, and `cfp_get` returns the path's own characters.
     #[test]
-    fn cfg_config_field_path_new_rejects_with_codes_817_818() {
-        let error = ConfigFieldPath::new(Path::new("relative/crate")).unwrap_err();
+    fn cfg_config_field_path_cfp_new_rejects_with_codes_817_818_837() {
+        let error = ConfigFieldPath::cfp_new(Path::new("relative/crate")).unwrap_err();
         assert_eq!(error, HeatmapError::CfgPathNotAbsolute);
         assert_eq!(error.code(), 817);
 
@@ -8569,54 +10217,55 @@ fn idle() {}\n";
             "/home/user/a\nb",
             "/home/user/a\tb",
         ] {
-            let error = ConfigFieldPath::new(Path::new(bad_text)).unwrap_err();
-            assert_eq!(error, HeatmapError::CfgPathValueInvalid, "{:?}", bad_text);
+            let error = ConfigFieldPath::cfp_new(Path::new(bad_text)).unwrap_err();
+            assert_eq!(
+                error,
+                HeatmapError::CfgPathValueNotStorable,
+                "{:?}",
+                bad_text
+            );
             assert_eq!(error.code(), 818);
         }
+
+        let longest_path = format!("/{}", "a".repeat(MAX_CONFIG_PATH_BYTES - 1));
+        assert!(ConfigFieldPath::cfp_new(Path::new(&longest_path)).is_ok());
+        let one_byte_over = format!("/{}", "a".repeat(MAX_CONFIG_PATH_BYTES));
+        assert_eq!(
+            ConfigFieldPath::cfp_new(Path::new(&one_byte_over)).unwrap_err(),
+            HeatmapError::CfgPathValueNotStorable
+        );
 
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
             let non_utf8_path = Path::new(std::ffi::OsStr::from_bytes(b"/home/user/a\xffb"));
-            assert_eq!(
-                ConfigFieldPath::new(non_utf8_path).unwrap_err(),
-                HeatmapError::CfgPathValueInvalid
-            );
+            let error = ConfigFieldPath::cfp_new(non_utf8_path).unwrap_err();
+            assert_eq!(error, HeatmapError::CfgPathValueNotUtf8);
+            assert_eq!(error.code(), 837);
         }
 
-        let longest_path = format!("/{}", "a".repeat(MAX_CONFIG_PATH_BYTES - 1));
-        assert!(ConfigFieldPath::new(Path::new(&longest_path)).is_ok());
-        let one_byte_over = format!("/{}", "a".repeat(MAX_CONFIG_PATH_BYTES));
-        assert_eq!(
-            ConfigFieldPath::new(Path::new(&one_byte_over)).unwrap_err(),
-            HeatmapError::CfgPathValueInvalid
-        );
-
-        let field_path = ConfigFieldPath::new(Path::new("/home/user/code")).unwrap();
-        assert_eq!(field_path.get_path_str().unwrap(), "/home/user/code");
+        let field_path = ConfigFieldPath::cfp_new(Path::new("/home/user/code")).unwrap();
+        assert_eq!(field_path.cfp_get().unwrap(), "/home/user/code");
     }
 
     /// Invariant catch: a path value corrupted after construction (relative,
-    /// or holding a quote; built directly, bypassing `new`) is rejected by
-    /// `get_path_str` with 819.
+    /// or holding a quote; built directly, bypassing `cfp_new`) is refused
+    /// by `cfp_get` with 819.
     #[test]
-    fn cfg_config_field_path_get_path_str_corrupted_with_code_819() {
+    fn cfg_config_field_path_cfp_get_corrupted_with_code_819() {
         for corrupted_text in ["relative/path", "/home/a\"b"] {
             let corrupted = ConfigFieldPath {
                 field_path_text: String::from(corrupted_text),
             };
-            let error = corrupted.get_path_str().unwrap_err();
+            let error = corrupted.cfp_get().unwrap_err();
             assert_eq!(error, HeatmapError::CfgPathValueCorrupted);
             assert_eq!(error.code(), 819);
         }
     }
 
     /// The written layout is fixed, so config files written by different HIX
-    /// runs look the same and can be compared and hand-read.
-    ///
-    /// The expected text is built with `concat!`, one literal per line, so the
-    /// test cannot be broken by re-indenting the source (a string-continuation
-    /// literal would take on any indentation added by an editor or formatter).
+    /// runs look the same and can be compared and hand-read. Built with
+    /// `concat!`, one literal per line, so re-indenting cannot break it.
     #[test]
     fn cfg_render_config_file_text_matches_layout() {
         let expected_text = concat!(
@@ -8667,13 +10316,27 @@ fn idle() {}\n";
     }
 
     /// Rendering into a buffer that is too small returns 820, never a
-    /// truncated file.
+    /// truncated text.
     #[test]
     fn cfg_render_config_file_text_small_buffer_with_code_820() {
         let mut small_buffer = [0u8; 64];
         let error = render_config_file_text(&sample_config(None), &mut small_buffer).unwrap_err();
         assert_eq!(error, HeatmapError::CfgRenderBufferFull);
         assert_eq!(error.code(), 820);
+    }
+
+    /// Writing into a directory that does not exist fails fast with 821
+    /// (not retryable), and creates nothing.
+    #[test]
+    fn cfg_write_new_config_file_missing_directory_with_code_821() {
+        let missing_directory = unique_temp_path("cfg_missing_dir");
+        let config_file_path =
+            AbsolutePath::ap_new(missing_directory.join("hixtoml_missing.toml")).unwrap();
+        let error = write_new_config_file(&config_file_path, &sample_config(None)).unwrap_err();
+        assert_eq!(error, HeatmapError::CfgWriteOpenNotFound);
+        assert_eq!(error.code(), 821);
+        assert!(!error.is_retryable());
+        assert!(!missing_directory.exists());
     }
 
     /// Write, read back, and compare, with and without the optional field.
@@ -8684,8 +10347,9 @@ fn idle() {}\n";
         let directory = unique_temp_path("cfg_round_trip");
         fs::create_dir(&directory).unwrap();
         let with_units_path =
-            AbsolutePath::ap_new(directory.join("hix_pumpkin_world_spawn.toml")).unwrap();
-        let without_units_path = AbsolutePath::ap_new(directory.join("hix_no_units.toml")).unwrap();
+            AbsolutePath::ap_new(directory.join("hixtoml_pumpkin_world_spawn.toml")).unwrap();
+        let without_units_path =
+            AbsolutePath::ap_new(directory.join("hixtoml_no_units.toml")).unwrap();
 
         let config_with_units = sample_config(Some("chunks_generated"));
         write_new_config_file(&with_units_path, &config_with_units).unwrap();
@@ -8722,12 +10386,12 @@ fn idle() {}\n";
     fn cfg_write_new_config_file_longest_values_round_trip() {
         let longest_path = format!("/{}", "a".repeat(MAX_CONFIG_PATH_BYTES - 1));
         let longest_config = HixConfig {
-            target_crate_path: ConfigPath::cp_new(Path::new(&longest_path)).unwrap(),
-            target_binary_name: CargoBinaryName::ntk_new(&"b".repeat(MAX_CARGO_BINARY_NAME_BYTES))
+            target_crate_path: ConfigFieldPath::cfp_new(Path::new(&longest_path)).unwrap(),
+            target_binary_name: CargoBinaryName::cbn_new(&"b".repeat(MAX_CARGO_BINARY_NAME_BYTES))
                 .unwrap(),
-            modeling_data_path: ConfigPath::cp_new(Path::new(&longest_path)).unwrap(),
-            scenario_name: ScenarioName::ntk_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES)).unwrap(),
-            analysis_purpose: AnalysisPurpose::ntk_new(&"p".repeat(MAX_ANALYSIS_PURPOSE_BYTES))
+            modeling_data_path: ConfigFieldPath::cfp_new(Path::new(&longest_path)).unwrap(),
+            scenario_name: ScenarioName::scn_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES)).unwrap(),
+            analysis_purpose: AnalysisPurpose::apu_new(&"p".repeat(MAX_ANALYSIS_PURPOSE_BYTES))
                 .unwrap(),
             top_n: TopNCount::tnc_new(MAX_TOP_N).unwrap(),
             work_unit_name: Some(
@@ -8737,7 +10401,8 @@ fn idle() {}\n";
         };
         let directory = unique_temp_path("cfg_longest");
         fs::create_dir(&directory).unwrap();
-        let config_file_path = AbsolutePath::ap_new(directory.join("hix_longest.toml")).unwrap();
+        let config_file_path =
+            AbsolutePath::ap_new(directory.join("hixtoml_longest.toml")).unwrap();
 
         write_new_config_file(&config_file_path, &longest_config).unwrap();
         assert_eq!(load_config_file(&config_file_path).unwrap(), longest_config);
@@ -8751,7 +10416,7 @@ fn idle() {}\n";
     #[test]
     fn cfg_load_config_file_rejects_invalid_files_with_listed_codes() {
         let valid_text = render_config_to_string(&sample_config(Some("chunks_generated")));
-        let cases: [(&str, &str, &str, HeatmapError, u16); 7] = [
+        let cases: &[(&str, &str, &str, HeatmapError, u16)] = &[
             (
                 "duplicate key",
                 "top_n = 15\n",
@@ -8788,11 +10453,25 @@ fn idle() {}\n";
                 817,
             ),
             (
+                "path with backslash",
+                "target_crate_path = \"/home/user/code/Pumpkin\"\n",
+                "target_crate_path = \"/home/user/code/Pump\\kin\"\n",
+                HeatmapError::CfgPathValueNotStorable,
+                818,
+            ),
+            (
+                "top_n not a number",
+                "top_n = 15\n",
+                "top_n = fifteen\n",
+                HeatmapError::CfgTopNNotANumber,
+                833,
+            ),
+            (
                 "top_n out of range",
                 "top_n = 15\n",
                 "top_n = 0\n",
-                HeatmapError::CfgTopNInvalid,
-                833,
+                HeatmapError::CfgTopNOutOfRange,
+                838,
             ),
             (
                 "bad boolean",
@@ -8800,6 +10479,34 @@ fn idle() {}\n";
                 "demangle_outputs = yes\n",
                 HeatmapError::CfgBooleanInvalid,
                 834,
+            ),
+            (
+                "bad work unit name",
+                "work_unit_name = \"chunks_generated\"\n",
+                "work_unit_name = \"chunks generated\"\n",
+                HeatmapError::CfgWorkUnitNameInvalid,
+                835,
+            ),
+            (
+                "bad scenario name",
+                "scenario_name = \"pumpkin_world_spawn\"\n",
+                "scenario_name = \"pumpkin world spawn\"\n",
+                HeatmapError::TypeScenarioNameInvalid,
+                164,
+            ),
+            (
+                "bad binary name",
+                "target_binary_name = \"pumpkin\"\n",
+                "target_binary_name = \"pump kin\"\n",
+                HeatmapError::TypeCargoBinaryNameInvalid,
+                166,
+            ),
+            (
+                "bad analysis purpose",
+                "analysis_purpose = \"count_baseline\"\n",
+                "analysis_purpose = \"count/baseline\"\n",
+                HeatmapError::TypeAnalysisPurposeInvalid,
+                168,
             ),
         ];
         for (
@@ -8813,13 +10520,33 @@ fn idle() {}\n";
                 case_label
             );
             let bad_text = valid_text.replacen(original_line, replacement_text, 1);
-            let (directory, config_file_path) =
-                write_temp_config_text(&format!("cfg_load_reject_{}", case_index), &bad_text);
+            let (directory, config_file_path) = write_temp_config_bytes(
+                &format!("cfg_load_reject_{}", case_index),
+                bad_text.as_bytes(),
+            );
             let error = load_config_file(&config_file_path).unwrap_err();
             remove_temp_config(&directory, &config_file_path);
             assert_eq!(error, *expected_error, "{}", case_label);
             assert_eq!(error.code(), *expected_code, "{}", case_label);
         }
+    }
+
+    /// A hand-edited file with a non-UTF-8 byte inside a value is refused
+    /// with 830 (the field reader copies bytes; the loader checks UTF-8).
+    #[test]
+    fn cfg_load_config_file_value_not_utf8_with_code_830() {
+        let valid_text = render_config_to_string(&sample_config(None));
+        let original_line = "scenario_name = \"pumpkin_world_spawn\"\n";
+        let (text_before, text_after) = valid_text.split_once(original_line).unwrap();
+        let mut bad_bytes: Vec<u8> = Vec::new();
+        bad_bytes.extend_from_slice(text_before.as_bytes());
+        bad_bytes.extend_from_slice(b"scenario_name = \"pumpkin\xffspawn\"\n");
+        bad_bytes.extend_from_slice(text_after.as_bytes());
+        let (directory, config_file_path) = write_temp_config_bytes("cfg_not_utf8", &bad_bytes);
+        let error = load_config_file(&config_file_path).unwrap_err();
+        remove_temp_config(&directory, &config_file_path);
+        assert_eq!(error, HeatmapError::CfgValueNotUtf8);
+        assert_eq!(error.code(), 830);
     }
 
     /// Hand edits that stay within the format are accepted: spaces around
@@ -8835,19 +10562,340 @@ fn idle() {}\n";
                 1,
             )
             + "unknown_future_key = \"ignored\"\n";
-        let (directory, config_file_path) = write_temp_config_text("cfg_hand_edited", &edited_text);
+        let (directory, config_file_path) =
+            write_temp_config_bytes("cfg_hand_edited", edited_text.as_bytes());
         let loaded = load_config_file(&config_file_path).unwrap();
         remove_temp_config(&directory, &config_file_path);
         assert_eq!(loaded, sample_config(None));
     }
 
-    /// The config file name is `hix_<scenario>.toml`.
+    /// The config file name is `hixtoml_<scenario>.toml`.
     #[test]
     fn cfg_config_file_name_for_scenario_builds_name() {
-        let scenario_name = ScenarioName::ntk_new("pumpkin_world_spawn").unwrap();
+        let scenario_name = ScenarioName::scn_new("pumpkin_world_spawn").unwrap();
         assert_eq!(
             config_file_name_for_scenario(&scenario_name).unwrap(),
-            "hix_pumpkin_world_spawn.toml"
+            "hixtoml_pumpkin_world_spawn.toml"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Wizard, Stage 1
+    // ------------------------------------------------------------------
+
+    /// Only the exact command line `hix --wizard` selects the wizard.
+    #[test]
+    fn wiz_is_wizard_invocation_only_exact_flag() {
+        assert!(is_wizard_invocation(
+            os_arguments(&["hix", "--wizard"]).into_iter()
+        ));
+        assert!(!is_wizard_invocation(os_arguments(&["hix"]).into_iter()));
+        assert!(!is_wizard_invocation(
+            os_arguments(&["hix", "--wizard", "extra"]).into_iter()
+        ));
+        assert!(!is_wizard_invocation(
+            os_arguments(&["hix", "--lcov", "/abs/in.lcov"]).into_iter()
+        ));
+    }
+
+    /// The effective uid is the second number of the `Uid:` line.
+    /// Missing or broken lines return 704.
+    #[test]
+    fn wiz_parse_effective_uid_from_proc_status_with_code_704() {
+        let normal_user = b"Name:\thix\nUid:\t1000\t1001\t1000\t1000\nGid:\t1000\n";
+        assert_eq!(
+            parse_effective_uid_from_proc_status(normal_user).unwrap(),
+            1001
+        );
+        let root_user = b"Uid:\t0\t0\t0\t0\n";
+        assert_eq!(parse_effective_uid_from_proc_status(root_user).unwrap(), 0);
+        for broken_status in [
+            &b"Name:\thix\n"[..],
+            &b"Uid:\t1000\n"[..],
+            &b"Uid:\tx\ty\n"[..],
+        ] {
+            let error = parse_effective_uid_from_proc_status(broken_status).unwrap_err();
+            assert_eq!(error, HeatmapError::WizProcStatusMalformed);
+            assert_eq!(error.code(), 704);
+        }
+    }
+
+    /// `perf_event_paranoid` is one integer, possibly negative; other text returns 717.
+    #[test]
+    fn wiz_parse_perf_event_paranoid_text_with_code_717() {
+        assert_eq!(parse_perf_event_paranoid_text(b"2\n").unwrap(), 2);
+        assert_eq!(parse_perf_event_paranoid_text(b"-1\n").unwrap(), -1);
+        for broken_text in [&b"abc"[..], &b"\xff"[..], &b""[..]] {
+            let error = parse_perf_event_paranoid_text(broken_text).unwrap_err();
+            assert_eq!(error, HeatmapError::WizPerfParanoidMalformed);
+            assert_eq!(error.code(), 717);
+        }
+    }
+
+    /// A program that cannot exist is reported as not found, without an error.
+    #[test]
+    fn wiz_run_one_tool_check_missing_program_is_not_found() {
+        let impossible_tool = RequiredToolCheck {
+            tool_label: "impossible",
+            program_name: "hix_test_program_that_does_not_exist_7f3a",
+            program_arguments: &["--version"],
+            required_line_prefix: None,
+            install_hint: "none",
+        };
+        assert_eq!(
+            run_one_tool_check(&impossible_tool),
+            ToolCheckOutcome::NotFound
+        );
+    }
+
+    /// Classification: failed exit, first line, required prefix found or missing.
+    #[test]
+    fn wiz_classify_tool_check_output_cases() {
+        assert_eq!(
+            classify_tool_check_output(None, false, b"x\n"),
+            ToolCheckOutcome::ExitedWithFailure
+        );
+        assert_eq!(
+            classify_tool_check_output(None, true, b"rustfilt 0.2.2\nmore\n"),
+            ToolCheckOutcome::Installed {
+                reported_line: String::from("rustfilt 0.2.2")
+            }
+        );
+        let component_list =
+            b"cargo-x86_64-unknown-linux-gnu\nllvm-tools-x86_64-unknown-linux-gnu\n";
+        assert_eq!(
+            classify_tool_check_output(Some("llvm-tools"), true, component_list),
+            ToolCheckOutcome::Installed {
+                reported_line: String::from("llvm-tools-x86_64-unknown-linux-gnu")
+            }
+        );
+        assert_eq!(
+            classify_tool_check_output(Some("llvm-tools"), true, b"cargo-x86_64\n"),
+            ToolCheckOutcome::RequiredLineMissing
+        );
+    }
+
+    /// Answers lose their line ending and surrounding spaces; end of input,
+    /// over-long answers, and non-UTF-8 answers each return their own code.
+    #[test]
+    fn wiz_read_wizard_answer_cases_with_codes_706_718_719() {
+        let mut normal_input = Cursor::new(b"  abc  \r\nnext\n".to_vec());
+        assert_eq!(read_wizard_answer(&mut normal_input).unwrap(), "abc");
+        assert_eq!(read_wizard_answer(&mut normal_input).unwrap(), "next");
+        assert_eq!(
+            read_wizard_answer(&mut normal_input).unwrap_err(),
+            HeatmapError::WizInputEnded
+        );
+        assert_eq!(HeatmapError::WizInputEnded.code(), 706);
+
+        let mut long_input = Cursor::new(vec![b'x'; MAX_WIZARD_ANSWER_BYTES + 1]);
+        let error = read_wizard_answer(&mut long_input).unwrap_err();
+        assert_eq!(error, HeatmapError::WizAnswerTooLong);
+        assert_eq!(error.code(), 718);
+
+        let mut non_utf8_input = Cursor::new(b"\xff\n".to_vec());
+        let error = read_wizard_answer(&mut non_utf8_input).unwrap_err();
+        assert_eq!(error, HeatmapError::WizAnswerNotUtf8);
+        assert_eq!(error.code(), 719);
+    }
+
+    /// Yes/no: an unclear answer is asked again; letter case is ignored;
+    /// end of input stops with 706.
+    #[test]
+    fn wiz_ask_yes_no_reasks_and_ends_on_end_of_input() {
+        let mut wizard_input = Cursor::new(b"maybe\nY\n".to_vec());
+        let mut wizard_output: Vec<u8> = Vec::new();
+        assert!(ask_yes_no(&mut wizard_input, &mut wizard_output, "Go?").unwrap());
+        let output_text = String::from_utf8(wizard_output).unwrap();
+        assert!(output_text.contains("please answer y or n"));
+
+        let mut empty_input = Cursor::new(Vec::new());
+        let mut ignored_output: Vec<u8> = Vec::new();
+        assert_eq!(
+            ask_yes_no(&mut empty_input, &mut ignored_output, "Go?").unwrap_err(),
+            HeatmapError::WizInputEnded
+        );
+    }
+
+    /// A rejected answer prints its code and the rule, then asks again; an
+    /// empty answer uses the default.
+    #[test]
+    fn wiz_ask_until_valid_rejects_then_uses_default() {
+        let mut wizard_input = Cursor::new(b"bad name\n\n".to_vec());
+        let mut wizard_output: Vec<u8> = Vec::new();
+        let purpose = ask_until_valid(
+            &mut wizard_input,
+            &mut wizard_output,
+            "Purpose",
+            Some(DEFAULT_ANALYSIS_PURPOSE),
+            "rule text",
+            AnalysisPurpose::apu_new,
+        )
+        .unwrap();
+        assert_eq!(purpose.apu_get().unwrap(), DEFAULT_ANALYSIS_PURPOSE);
+        let output_text = String::from_utf8(wizard_output).unwrap();
+        assert!(output_text.contains("not accepted (HIX code 168): rule text"));
+    }
+
+    /// Config choice: n, a listed number, and rejected answers (727).
+    #[test]
+    fn wiz_parse_config_choice_answer_with_code_727() {
+        let names = vec![
+            String::from("hixtoml_a.toml"),
+            String::from("hixtoml_b.toml"),
+        ];
+        assert_eq!(parse_config_choice_answer("n", &names).unwrap(), None);
+        assert_eq!(
+            parse_config_choice_answer("2", &names).unwrap(),
+            Some(String::from("hixtoml_b.toml"))
+        );
+        for bad_answer in ["0", "3", "x", ""] {
+            let error = parse_config_choice_answer(bad_answer, &names).unwrap_err();
+            assert_eq!(
+                error,
+                HeatmapError::WizConfigChoiceInvalid,
+                "{:?}",
+                bad_answer
+            );
+            assert_eq!(error.code(), 727);
+        }
+    }
+
+    /// Only `hixtoml_<valid scenario name>.toml` counts as a config file name.
+    #[test]
+    fn wiz_is_config_file_name_cases() {
+        assert!(is_config_file_name("hixtoml_pumpkin_world_spawn.toml"));
+        assert!(!is_config_file_name("hix_pumpkin.toml"));
+        assert!(!is_config_file_name("hixtoml_.toml"));
+        assert!(!is_config_file_name("hixtoml_a b.toml"));
+        assert!(!is_config_file_name("hixtoml_a.toml.bak"));
+        assert!(!is_config_file_name("Cargo.toml"));
+    }
+
+    /// Run numbers come only from `run_<digits>_...` names.
+    #[test]
+    fn wiz_run_number_from_folder_name_cases() {
+        assert_eq!(run_number_from_folder_name("run_005_pumpkin"), Some(5));
+        assert_eq!(run_number_from_folder_name("run_1_x"), Some(1));
+        assert_eq!(run_number_from_folder_name("run_0012_a"), Some(12));
+        assert_eq!(
+            run_number_from_folder_name("run_99999999999_x"),
+            Some(u32::MAX)
+        );
+        assert_eq!(run_number_from_folder_name("run_005"), None);
+        assert_eq!(run_number_from_folder_name("run__x"), None);
+        assert_eq!(run_number_from_folder_name("test_5"), None);
+        assert_eq!(run_number_from_folder_name("analysis_001_x"), None);
+    }
+
+    /// The next run number is the highest plus 1; past `MAX_RUN_NUMBER` it is 714.
+    #[test]
+    fn wiz_next_run_number_highest_plus_one_and_exhausted_with_code_714() {
+        let modeling_directory = unique_temp_path("wiz_run_numbers");
+        fs::create_dir(&modeling_directory).unwrap();
+        assert_eq!(next_run_number(&modeling_directory).unwrap(), 1);
+        fs::create_dir(modeling_directory.join("run_004_old")).unwrap();
+        fs::create_dir(modeling_directory.join("test_5")).unwrap();
+        assert_eq!(next_run_number(&modeling_directory).unwrap(), 5);
+        fs::create_dir(modeling_directory.join("run_9999_last")).unwrap();
+        let error = next_run_number(&modeling_directory).unwrap_err();
+        assert_eq!(error, HeatmapError::WizRunNumberExhausted);
+        assert_eq!(error.code(), 714);
+        fs::remove_dir_all(&modeling_directory).unwrap();
+    }
+
+    /// End to end with a new config: the directories are created, a valid
+    /// config is written (defaults used), and run 001 is planned.
+    #[test]
+    fn wiz_run_wizard_setup_dialog_new_config_plans_run_001() {
+        let base_directory = unique_temp_path("wiz_new_config");
+        fs::create_dir(&base_directory).unwrap();
+        let crate_directory = base_directory.join("target_crate");
+        fs::create_dir(&crate_directory).unwrap();
+        fs::write(crate_directory.join("Cargo.toml"), "[package]\n").unwrap();
+
+        // base: y; create dirs: y; crate; binary; scenario; purpose default;
+        // top_n default; no work unit; demangle: n; write: y.
+        let answers = format!(
+            "y\ny\n{}\npumpkin\nworld_spawn\n\n\n\nn\ny\n",
+            crate_directory.display()
+        );
+        let mut wizard_input = Cursor::new(answers.into_bytes());
+        let mut wizard_output: Vec<u8> = Vec::new();
+        run_wizard_setup_dialog(&mut wizard_input, &mut wizard_output, &base_directory).unwrap();
+        let output_text = String::from_utf8(wizard_output).unwrap();
+
+        assert!(base_directory.join(MODELING_DATA_DIRECTORY_NAME).is_dir());
+        let config_file_path = base_directory
+            .join(CONFIG_FILES_DIRECTORY_NAME)
+            .join("hixtoml_world_spawn.toml");
+        let loaded = load_config_file(&AbsolutePath::ap_new(config_file_path).unwrap()).unwrap();
+        assert_eq!(
+            loaded.analysis_purpose.apu_get().unwrap(),
+            DEFAULT_ANALYSIS_PURPOSE
+        );
+        assert_eq!(loaded.top_n.tnc_get().unwrap(), DEFAULT_TOP_N);
+        assert!(loaded.work_unit_name.is_none());
+        assert!(!loaded.demangle_outputs);
+        assert!(output_text.contains("run_001_world_spawn"));
+        assert!(output_text.contains("--bin pumpkin"));
+        assert!(output_text.contains("analysis_001_count_baseline"));
+
+        fs::remove_dir_all(&base_directory).unwrap();
+    }
+
+    /// End to end with an existing config: picked by number, and the next
+    /// run number follows the highest existing run folder (004 -> 005).
+    #[test]
+    fn wiz_run_wizard_setup_dialog_existing_config_plans_next_run() {
+        let base_directory = unique_temp_path("wiz_existing_config");
+        let modeling_directory = base_directory.join(MODELING_DATA_DIRECTORY_NAME);
+        let config_directory = base_directory.join(CONFIG_FILES_DIRECTORY_NAME);
+        fs::create_dir(&base_directory).unwrap();
+        fs::create_dir(&modeling_directory).unwrap();
+        fs::create_dir(&config_directory).unwrap();
+        fs::create_dir(modeling_directory.join("run_004_old")).unwrap();
+        fs::create_dir(modeling_directory.join("test_5")).unwrap();
+
+        let config = HixConfig {
+            target_crate_path: ConfigFieldPath::cfp_new(&base_directory.join("crate")).unwrap(),
+            target_binary_name: CargoBinaryName::cbn_new("lines").unwrap(),
+            modeling_data_path: ConfigFieldPath::cfp_new(&modeling_directory).unwrap(),
+            scenario_name: ScenarioName::scn_new("cut_paste").unwrap(),
+            analysis_purpose: AnalysisPurpose::apu_new("count_baseline").unwrap(),
+            top_n: TopNCount::tnc_new(10).unwrap(),
+            work_unit_name: Some(WorkUnitName::wun_new("edits").unwrap()),
+            demangle_outputs: true,
+        };
+        let config_file_path =
+            AbsolutePath::ap_new(config_directory.join("hixtoml_cut_paste.toml")).unwrap();
+        write_new_config_file(&config_file_path, &config).unwrap();
+
+        let mut wizard_input = Cursor::new(b"y\n1\n".to_vec());
+        let mut wizard_output: Vec<u8> = Vec::new();
+        run_wizard_setup_dialog(&mut wizard_input, &mut wizard_output, &base_directory).unwrap();
+        let output_text = String::from_utf8(wizard_output).unwrap();
+        assert!(output_text.contains("using hixtoml_cut_paste.toml"));
+        assert!(output_text.contains("run_005_cut_paste"));
+        assert!(output_text.contains("--work-unit-name edits"));
+        assert!(output_text.contains("rustfilt <"));
+
+        fs::remove_dir_all(&base_directory).unwrap();
+    }
+
+    /// Declining directory creation stops with 710 and creates nothing.
+    #[test]
+    fn wiz_run_wizard_setup_dialog_declined_directories_with_code_710() {
+        let base_directory = unique_temp_path("wiz_declined");
+        fs::create_dir(&base_directory).unwrap();
+        let mut wizard_input = Cursor::new(b"y\nn\n".to_vec());
+        let mut wizard_output: Vec<u8> = Vec::new();
+        let error = run_wizard_setup_dialog(&mut wizard_input, &mut wizard_output, &base_directory)
+            .unwrap_err();
+        assert_eq!(error, HeatmapError::WizUserDeclinedDirectoryCreation);
+        assert_eq!(error.code(), 710);
+        assert!(!base_directory.join(MODELING_DATA_DIRECTORY_NAME).exists());
+        assert!(!base_directory.join(CONFIG_FILES_DIRECTORY_NAME).exists());
+        fs::remove_dir(&base_directory).unwrap();
     }
 }
