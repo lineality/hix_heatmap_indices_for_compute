@@ -108,17 +108,15 @@ Three dimensions for planning/specifying contexts and priorities:
 - 2. Priority-Focus x 
 - 3. Code-Region-Type 
 
-1. Policy: 
+1. Policy: (exclusive)
 - Neutral Policy
-- Balance (or Balance with {other area([s])})
-- Exclude / Must not use at all 
-- Max(imize) / Use as Cheapest 
-- Exclusive / Use Exclusively 
-- Min(imize) / Reduce-Footprint
-- Minimized in Hot Regions
+- Balance (or Balance with {other area([s])}, possibly proportional/tradeoff)
+- Excluded / Must not use at all
+- Exclusive / Must use only (Exclusively) 
+- Maximized / Use as Optimal 
+- Minimized / Reduce-Footprint
 
-
-Priority-Focus Areas:
+2. Priority-Focus Areas: (not exclusive / often combined)
 - Security / Privacy
 - Resilience, Redundancy, & (Edge) Case Handling
 - Stack Memory
@@ -134,13 +132,23 @@ Priority-Focus Areas:
 - Database-ACID Time
 - Cross-Platform-Ness
 - Edge-Embedded-Ness
+- Batch-Bulk
+- Single
+- uniform demand
+- heterogeneous demand
+- Scheduled
+- Sporadic 
+(e.g. scheduled large batches scaled for parallel vs. sporadic individual operations)
 
 
-### Code-Region-Type:
-- Hot, 
-- Gray-Oatmeal, 
+3. Code-Region-Type:
+- Hot
 - Cold
+- Tepid
+- Bi-polar
 
+
+### ~Types of Analysis
 
 0. Dashboard, Report-Organization: Useful presentation and exploration of data. E.g. Specific types and sub-types of head and tracing back what/where was measured how. (terminal/TUI, file(e.g. json), HTML, PDF)
 
@@ -153,7 +161,8 @@ e.g. ~ (maybe)
 total_site_time ≈ site_call_count × avg_time_per_call
 run_share  = total_site_time / total_time
 
-#### Performance Quadrant: 
+
+### Performance Quadrant: 
 - High count, high time/call
 - High count, low time/call
 - Low count, high time/call
@@ -190,13 +199,12 @@ Two possible 'modes' for using this tool are:
 1. Looking at heat, which might or might not be natural differences (you can't tell unless you look) (maybe the default)
 2. Identifying patterns or signatures that are not just 'places to look for issues that might not exist' but that are likely issues themselves detected directly. (maybe speculative)
 
-#### Maybe: 
+#### Maybe: (Can probably be divided into a larger cleaner framework)
 - Level 1 Macro (MVP): Function-Loop Level Maps, Scores
 - Level 2 (Zoom-in): Inside Hot Functions & Loops: Maps, Scores
 
 
 # MVP Overview:
-
 
 #### count, report, and analyze these metrics:
 
@@ -221,7 +229,6 @@ A function may only run once but still contain a hot-loop
 but a not-loop function... will at least on a first pass be counted as spotted? So maybe only loops and functions (not other regions) to be counted?
 
 
-
 #### Primary Analysis: 
 'heat map' of functions and loop counts: Relative Heat Counts, Logs, Percents, for N-time or N-max-loops (u32)
 
@@ -231,7 +238,6 @@ Lag-Map: How-Slow: a super-duper-slow function/loop might not be called that man
 #### Meta-Analysis: 
 Where to improve how?
 In some cases another step of digging may be needed: e.g. If a given function is hot or laggy, what exactly in/about that function is the issue/solution?
-
 
 
 ### Analysis that scales with sanity: for small or large projects
@@ -275,18 +281,24 @@ Trying to dig or peer in some way to some depth into the 'implimentation' areas 
 While using existing tools may make the most sense or be unavoidable, the ethos of the type of software the HIX is built with values 'roll your own' 'in-house' zero-dependency type tools. This might be unrealistic or infeasible, but long-term deeper features and maintainability usually interdigitate with native in-house implementations. E.g. one cannot very well compare the resulting binaries and memory-count-time behaviors across different OS, architectures, and compilers, and build-settings, if LLVM is built in as the hidden-magic-kludge. The initial focus here is on Rust, but the larger problem space extends across c-family, fil-c, zig, odin, embedded devices, and may get into the 'Proto-Type' set of puzzles ( https://github.com/lineality/operations_memory_state_manager ). Again, naive-ambission may be impractical, and the target-scope is not (and should not be) all of the real larger problem space, but knowing what that problem-space is is still required due-dilligence. 
 
 
-### Two Approaches Compared
+### Lower-Level Approaches Compared
 
 In a context of First-Scope-Design we will consider two general approaches, of which a hybrid may (or may not) eventually be used. 
 1. Using Linux, LLVM & Rust compile tools to inspect without modifying code.
 2. Adding measurement-inspection code to a repo.
 
+(In theory a manual code-insertion system could be adapted to more languages and platforms (e.g. not restricted to Rust on Linux).)
 
 
+1. Living off the Land / Living with the Locals
+2. DIY Surgery
+3. Bughunt Radar
 
-## Naive Approach 1:
+## Approach 1: Living off the Land / Living with the Locals
 
-Use a rust compiler flag 
+Using Linux, LLVM & Rust compile tools to inspect without modifying code.
+
+Use a rust compiler flag: 
 ```shell
 -C instrument-coverage
 ```
@@ -318,7 +330,7 @@ POC-2a: self time only. Sample without call graphs and attribute each sample to 
 POC-2b: inclusive time. Use frame-pointer call graphs (-C force-frame-pointers=yes), never DWARF unwinding. Cap the stack depth per sample, which keeps loops bounded.
 ```
 
-## Naive Approach 2:
+## Approach 2: DIY Surgery
 
 1. Make an ephemeral copy (or copies) of a repo
 2. Inject into that test-repo time/count code to record analytics 
@@ -340,6 +352,25 @@ A. adding a counter directly to an audit structure in memory (arguably ideal in 
 B. appending to a file, or (rarely or never needed)
 
 C. creating a 'count' stub-file in a directory (may be async-safe) (rarely or never needed)
+
+### Time Measures:
+While unfashionable, it may be necessary to use the original direct simple approach of writing time-log measures into various scales of a project in order to get accurate run-time measures.
+
+cargo llvm-cov only operates by first recompiling the code, making run-time not including compile-time sometimes difficult or impossible to obtain by one or another method.
+
+At this early stage it is unclear if there is a simple fix or no fix.
+
+In theory overall start-stop timestamp code could be easily and unobtrusively added, e.g. if overall code (due to included compilation time) might be one edgecase where adding inspection code is useful. 
+
+Individual targeted region timing may also be another use-case for added inspection code.
+
+
+### Approach 3. Bughunt Radar / Client-Server Realtime Tracker [JP-Over]
+
+The idea behind the Bughunt Radar / Client-Server Realtime Tracker is (related to DIY/Maffia-Surgery in implanting your own tracking devices) an alternative to using either RAM or files or such methods to store performance data for 'later' analysis: instead this approach send 'pings' (or other data) to the equivalent of endpoints in a separate client/server (depending on who is technically in what role) in real-time, so that you can watch (e.g. count) activity in some kind of graphical or spread-sheet like display (in real-time as you use the application in add-hoc ways a separate window/terminal). This could report counts, but it could also relay 'state' values like a debugger-server. It can A. show 'current' values, or cumulative values, or value patterns over time (time-graph), etc. Kind of like a Japanese Pizza. 
+
+
+
 
 
 ### Four Time Options
@@ -364,9 +395,11 @@ compare minimal and complete versions of time-measurements:
 
 If there is a difference, that is noted. If there isn't a difference, then that is noted.
 
+Placing individual trackers may avoid or minimize observer-effect.
+
 
 # Assumptions:
-1. adding code and run-audits will slow down the application, but the idea is to analyse proportional use, not exact real-time
+1. adding code and run-audits will slow down the application, but some useful information might still be obtained.
 
 2. For counts, only function and loop counts are needed, not 'region' counts because (the assumption goes) region-counts are included in either function or loop counts. E.g. in terms of overall relative counts, a loop in a rarely called function will be hot, but there is no region in a cold function or cold loop that is hot.
 
@@ -510,6 +543,14 @@ This tool is not (currently) conceived of as being for cases where everything is
 14. Policy: While having no third-party dependencies is ideal, there is a good chance that well-tested utilities exist (one would hope!) and can be used or cover all or or some of this sketch of scope. It may be possible to use no 3rd party rust crates (or so up to a point).
 
 
+15. lcov always including compilation introduces a run-time monitoring obstacle. 
+
+16. Simulated user replay (for exact re-testing) is a separate, advanced, optional scope (that might not be attempted); but it would be useful, if possibly application-specific.
+
+ 
+
+
+
 # File Structure for Use
 
 Test / run / modeling data should be saved to and accessed from a standardized and clearly named /modeling_data/ directory (which is safely git-ignored)
@@ -560,7 +601,7 @@ About Perf & Permissions:
 
 Wiz-Commands: User-commands are run in Bash using std::process::Command
 
-Probably a default Q&A asking user to indicate when processes start-stop, depending on what can be otherwise detected more precisely.
+Probably a default Q&A asking the user to indicate when processes start-stop, depending on what can be otherwise detected more precisely.
 
 5. Time/duration of test probably should be included...
 
@@ -577,10 +618,13 @@ Probably a default Q&A asking user to indicate when processes start-stop, depend
 
 
 # MVP-N Scope (not MVP-1)
-1. ...
+1. As more analysis and stages of analysis happen, should there be a json or other (semi) structured body of records to use as analysis proceeds?
 2. (Maybe) Targeted Report: specific file, specific sub-module, specific function, specific loop, (maybe for a tree of functions (called by a parent function...)
 3. (Maybe) nuanced async/atomic/concurrent/parallel analysis
 
+Note: check line-length for tsv files to check how much data are being bulk-loaded.
+
+Note: This sort of analysis mixed with repeatable input fuzzing might be useful for security and general stability testing.
 
 
 # Far Out of Scope (currently):
@@ -595,7 +639,8 @@ Probably a default Q&A asking user to indicate when processes start-stop, depend
 
 
 
-## "Threads": terms and phrases to work into docs, naming (just for fun):
+## "Threads": terms and phrases to work into docs, naming
+(just for fun; possibly in the wording of the wizard...):
 - game over
 - bug hunt
 - ripping
@@ -604,7 +649,7 @@ Probably a default Q&A asking user to indicate when processes start-stop, depend
 - mostly
 - snap judgments
 - "It's the only way to be sure."
-- "and you know the drill"
+- "you know the drill"
 - "only need to know one thing: where they are"
 - fifth wheel
 - "somebody's gonna have to go out there. Take a portable terminal, go out there and patch in manually."
@@ -612,3 +657,10 @@ Probably a default Q&A asking user to indicate when processes start-stop, depend
 - "Fifty-seven years"
 - ~"platform becoming too unstable"
 - "an ant-hive"
+
+# Use-Case Examples:
+- https://github.com/cair/TsetlinMachine : Rewriting and testing Granmo's python code in Rust, and test/evaluate for A. optimal single 'inference' B. optimal batch inference, C. optimal continual training, D. optimal full 'pre' training. 
+- MER
+- UMA
+- CSVDB
+- tunnels
