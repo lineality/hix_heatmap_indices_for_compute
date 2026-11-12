@@ -1510,6 +1510,73 @@ Part of having a function be 'focused' means knowing if the function is in scope
 
 1. redundant-checked values (less likely if both copies altered)
 2. Hamming code value formats
-3. 
 
-### Appendix 4: Advanced: Erasure of sensitive values as part of handling
+#### rust_lang_rules
+(Production-Rust rules of thumb)
+
+#### Also see [Mode & Case-Handling](https://github.com/lineality/modes_and_case_handling/blob/main/mode_case_handling_framework_summary.md)
+
+# 🦀 Rust Guidelines 🦀:
+- Always best practice.
+- Never ~unsafe code.
+- Always extensive doc strings: what the code is doing with project-context (Jack Welch is said to have said "The most dangerous thing is something perfectly executed that should never have been done in the first place." The project-context in documentation should elucidate whether something (e.g. a function) is contextually appropriate. If end-user context or crate-goal-context is needed to define what a given function needs to satisfy, that context must be in the documentation.)
+- Always clear comments.
+- Include cargo tests (where possible).
+- Functions should return result (in real life everything will fail at some point).
+- Never remove (current) documentation.
+- Always clear, meaningful, globally unique names (e.g. variables, functions, etc.): Do not give two things one name, do not give one thing two names. "name spaces" are not an exception; no colliding names.
+- Always absolute file paths
+- Always error handling
+- '?' should be avoided where it would obscure an error
+- Never use unwrap (in Production-Release builds / mode; use in Test Mode, cargo-tests, is obviously valid).
+- Always [handle](https://github.com/lineality/modes_and_case_handling) modes (Test Mode | Debug Mode | Production-Release Mode) and cases/errors appropriately, case by case, for that project. (There is no one-size-fits-all lazy-ideology.)
+- Always follow boy-scout values
+- Single-Flat: Default to a single-flat-file module x.rs. The crate src/ contains two files: main.rs and x.rs. main.rs uses "mod x; use x::FUNCTIONNAME;" to run the module. The single-flat-file module x.rs (where x = the name of the module) is portable to be added to other crates and projects).
+- Default to Vanilla-Rust: No third party crates.
+- Justified Design: Take performance and security into consideration when designing parts and architectures: Do not follow an ideology such as D.R.Y., OOP, single-responcibility, etc. without an extremely compelling reason (such as performance or a security need) to do so. The concept of 'flat-ness' may apply to function-planning as well as to module-file planning: only if there is an evidience-based compelling performance justification should a function be split into smaller functions (e.g., again, DRY is something that makes sense if and when (and only if and when) there is justification; ideology alone is not justification). As Casey Muratori has argued and demonstrated, fragmenting code into tiny, single-responsibility functions can blind not only humans but the compiler, preventing compilation into correct/optimal machine code. Idiologies such as 'single responcibility' and 'DRY' are addictive to humans (and learned by foundation models) but are at cross-purposes with producing sane, functional, sound, software.
+- Specify development-phase and use-type context (and related design-priorities): POC, MVP-1, use-once, long term production, etc.
+- Prefer this flag:```#![forbid(unsafe_code)]```
+
+# 🦀 10 Rust Rules 🦀:
+1. Avoid Risky Methodologies: 
+- no recursion  
+- no goto 
+- no fancy pointer use 
+- no preprocessor branching
+('unsafe' code blocks in Rust may be unavoidable, but using '#![forbid(unsafe_code)]' is a good starting default)
+
+2. Loops: either firmly bounded or unbounded w/ recovery
+
+3. Attempt to Pre-allocate all memory (stack, not heap)
+- case by case, avoid heap in production-release-mode where sound
+
+4. Clear Function Scope and Data Ownership
+
+5. Mode & Case Handling, & Defensive-Programming: 
+- Modes: test-mode, debug-mode, production-release-mode; 
+- continual state-recovery (without panic/halt) in production-release-mode
+- See Example/Default Framework: [github.com/lineality/modes_and_case_handling](https://github.com/lineality/modes_and_case_handling)
+
+6. Manage ownership and borrowing
+
+7. Manage return values
+
+8. Manage conditional compilation
+
+9. Communicate: 
+- Use doc strings; use comments. 
+- Document use-cases, edge-cases, policies, intent: features vs. bugs, etc.
+- Rather than let _ =, allow that result to be shown in debugging
+- log errors (MVP: append log file in executable-parent dir)
+
+10. Use state-less operations when possible
+
+#### References & Links:
+- https://en.wikipedia.org/wiki/The_Power_of_10:_Rules_for_Developing_Safety-Critical_Code
+- https://spinroot.com/gerard/pdf/P10.pdf 
+- https://spinroot.com/static/index.html 
+- https://web.eecs.umich.edu/~imarkov/10rules.pdf 
+- https://en.wikipedia.org/wiki/Static_program_analysis 
+- https://www.oreilly.com/library/view/designing-data-intensive-applications/9781491903063/
+- https://www.oreilly.com/library/view/rust-atomics-and/9781098119430/
+- Books by https://en.wikipedia.org/wiki/P._J._Plauger
