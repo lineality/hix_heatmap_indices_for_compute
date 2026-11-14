@@ -74,7 +74,8 @@
 //!   fn or closure may be attributed to that inner fn; a counted loop whose
 //!   attributed fn has count 0 is flagged "attribution suspect".
 //! - Stop condition: counts cover the whole run, until the instrumented
-//!   program exited cleanly. There is no in-tool duration or count cap.
+//!   program exited (any exit code). A program killed by a signal writes no
+//!   counts. There is no in-tool duration or count cap.
 //! - Function names may be mangled depending on tool versions; identity is
 //!   `source_path:line`, so counts are unaffected.
 //! - TSV fields are not escaped (paths containing tabs would break columns).
@@ -123,6 +124,13 @@
 //! overwritten), then read back and compared before it is used. It is read
 //! with the no-heap field reader described below. Keys, layout, and reading
 //! rules: see the "HIX config files" section.
+//!
+//! ## Wizard
+//! `hix --wizard` guides one run interactively: sudo and tool checks, the
+//! base directory (`modeling_data/`, `config_files/`), choosing or creating a
+//! config file, and the next run folder name; then, after a y, it runs the
+//! steps (clean, target run, LCOV export, analysis, demangle) and writes a
+//! run record. See the "Wizard" section.
 //!
 //! # Config File TOML Reading:
 //! ### From: read_toml_single_line_field_no_heap.rs
@@ -202,10 +210,9 @@
 //! unbuffered `File`, and tests give it in-memory input.
 //!
 //! ## RSLF Error codes
-//! Codes 801-816 are used (TOML-Reader);
-//! In HIX, 817–849 are the config-file codes. The table is in the HeatmapError doc comment.
-//! writer. Numbers range from 800-849 so that they may often be kept
-//! unchanged when this module is merged into a parent project in development.
+//! Codes 801-816 (TOML field reader). In HIX, 817-849 are the config-file
+//! codes. The reader's codes stay within 800-849 so they can usually be kept
+//! unchanged when this reader is copied into another project.
 //! The table is in the `HeatmapError` doc comment.
 //!
 //! ## Modes
@@ -228,6 +235,8 @@
 //! https://github.com/lineality/rust_lang_rules
 //! https://github.com/lineality/modes_and_case_handling
 //! https://github.com/lineality/modes_and_case_handling/blob/main/mode_case_handling_framework_summary.md
+
+/* TODO: --release hardcoded is not correct, e.g. --profile <PROFILE-NAME> is common */
 
 #![forbid(unsafe_code)]
 
@@ -347,9 +356,10 @@ const ERROR_LOG_FILE_NAME: &str = "hix_error_log.txt";
 
 /// Usage text shown by `main` for command-line errors (static: no heap).
 pub const USAGE_TEXT: &str = "\
-usage: hix --lcov /ABSOLUTE/path/file.lcov --out-dir /ABSOLUTE/output/dir [--top-n 1..10000]
-           [--run-label LABEL] [--run-duration-secs N] [--work-units N --work-unit-name NAME]
-       hix --wizard   guided setup: tool checks, config file, planned run (interactive)
+usage:
+  hix --lcov /ABSOLUTE/path/file.lcov --out-dir /ABSOLUTE/output/dir [--top-n 1..10000]
+    [--run-label LABEL] [--run-duration-secs N] [--work-units N --work-unit-name NAME]
+  hix --wizard    guided run: tool checks, config file, run, analysis (interactive)
 
   --lcov               LCOV file from: cargo llvm-cov report --lcov --output-path /ABSOLUTE/file.lcov
   --out-dir            NEW directory for hix_report.txt and hix_sites.tsv; must not exist yet
@@ -533,6 +543,33 @@ pub enum HeatmapError {
     WizConfigChoiceInvalid = 727,
     WizUserDeclinedConfigWrite = 728,
     WizScenarioConfigExists = 729,
+    WizRunFolderAppeared = 730,
+    WizRunFolderCreateFailed = 731,
+    WizRunRecordCreateFailed = 732,
+    WizRunRecordOpenFailed = 733,
+    WizRunRecordWriteFailed = 734,
+    WizRunRecordSyncFailed = 735,
+    WizConfigCopyReadFailed = 736,
+    WizConfigCopyCreateFailed = 737,
+    WizConfigCopyWriteFailed = 738,
+    WizCleanDeclined = 739,
+    WizCleanStartFailed = 740,
+    WizCleanExitedWithFailure = 741,
+    WizTargetRunDeclined = 742,
+    WizTargetRunStartFailed = 743,
+    WizLcovExportDeclined = 744,
+    WizLcovExportStartFailed = 745,
+    WizLcovExportExitedWithFailure = 746,
+    WizDemangleReportInputOpenFailed = 747,
+    WizDemangleReportOutputCreateFailed = 748,
+    WizDemangleReportStartFailed = 749,
+    WizDemangleReportExitedWithFailure = 750,
+    WizDemangleTsvInputOpenFailed = 751,
+    WizDemangleTsvOutputCreateFailed = 752,
+    WizDemangleTsvStartFailed = 753,
+    WizDemangleTsvExitedWithFailure = 754,
+    WizClockBeforeEpoch = 755,
+    WizWorkUnitsNotANumber = 756,
 
     // 800-849: TOML/Config file read/write
     // 801-816: TOML field reader (RSLF)
@@ -750,7 +787,34 @@ impl HeatmapError {
             | HeatmapError::WizCrateHasNoCargoToml
             | HeatmapError::WizConfigChoiceInvalid
             | HeatmapError::WizUserDeclinedConfigWrite
-            | HeatmapError::WizScenarioConfigExists => false,
+            | HeatmapError::WizScenarioConfigExists
+            | HeatmapError::WizRunFolderAppeared
+            | HeatmapError::WizRunFolderCreateFailed
+            | HeatmapError::WizRunRecordCreateFailed
+            | HeatmapError::WizRunRecordOpenFailed
+            | HeatmapError::WizRunRecordWriteFailed
+            | HeatmapError::WizRunRecordSyncFailed
+            | HeatmapError::WizConfigCopyReadFailed
+            | HeatmapError::WizConfigCopyCreateFailed
+            | HeatmapError::WizConfigCopyWriteFailed
+            | HeatmapError::WizCleanDeclined
+            | HeatmapError::WizCleanStartFailed
+            | HeatmapError::WizCleanExitedWithFailure
+            | HeatmapError::WizTargetRunDeclined
+            | HeatmapError::WizTargetRunStartFailed
+            | HeatmapError::WizLcovExportDeclined
+            | HeatmapError::WizLcovExportStartFailed
+            | HeatmapError::WizLcovExportExitedWithFailure
+            | HeatmapError::WizDemangleReportInputOpenFailed
+            | HeatmapError::WizDemangleReportOutputCreateFailed
+            | HeatmapError::WizDemangleReportStartFailed
+            | HeatmapError::WizDemangleReportExitedWithFailure
+            | HeatmapError::WizDemangleTsvInputOpenFailed
+            | HeatmapError::WizDemangleTsvOutputCreateFailed
+            | HeatmapError::WizDemangleTsvStartFailed
+            | HeatmapError::WizDemangleTsvExitedWithFailure
+            | HeatmapError::WizClockBeforeEpoch
+            | HeatmapError::WizWorkUnitsNotANumber => false,
         }
     }
 
@@ -1044,6 +1108,59 @@ impl std::fmt::Display for HeatmapError {
             HeatmapError::WizScenarioConfigExists => {
                 "a config file for this scenario name already exists"
             }
+            HeatmapError::WizRunFolderAppeared => {
+                "run folder already exists; HIX never reuses a run folder"
+            }
+            HeatmapError::WizRunFolderCreateFailed => "creating the run folder failed",
+            HeatmapError::WizRunRecordCreateFailed => "creating the run record file failed",
+            HeatmapError::WizRunRecordOpenFailed => "opening the run record for appending failed",
+            HeatmapError::WizRunRecordWriteFailed => "writing a run record line failed",
+            HeatmapError::WizRunRecordSyncFailed => "syncing the run record to disk failed",
+            HeatmapError::WizConfigCopyReadFailed => {
+                "reading the config file for its run-folder copy failed"
+            }
+            HeatmapError::WizConfigCopyCreateFailed => {
+                "creating the config copy in the run folder failed"
+            }
+            HeatmapError::WizConfigCopyWriteFailed => {
+                "writing the config copy in the run folder failed"
+            }
+            HeatmapError::WizCleanDeclined => "user declined the clean step; stopped",
+            HeatmapError::WizCleanStartFailed => "cargo llvm-cov clean could not be started",
+            HeatmapError::WizCleanExitedWithFailure => "cargo llvm-cov clean reported an error",
+            HeatmapError::WizTargetRunDeclined => "user declined the target run; stopped",
+            HeatmapError::WizTargetRunStartFailed => "cargo llvm-cov run could not be started",
+            HeatmapError::WizLcovExportDeclined => "user declined the LCOV export; stopped",
+            HeatmapError::WizLcovExportStartFailed => "cargo llvm-cov report could not be started",
+            HeatmapError::WizLcovExportExitedWithFailure => {
+                "cargo llvm-cov report reported an error"
+            }
+            HeatmapError::WizDemangleReportInputOpenFailed => {
+                "opening hix_report.txt for rustfilt failed"
+            }
+            HeatmapError::WizDemangleReportOutputCreateFailed => {
+                "creating hix_report.demangled.txt failed (create-new)"
+            }
+            HeatmapError::WizDemangleReportStartFailed => {
+                "rustfilt could not be started for the report"
+            }
+            HeatmapError::WizDemangleReportExitedWithFailure => {
+                "rustfilt reported an error for the report"
+            }
+            HeatmapError::WizDemangleTsvInputOpenFailed => {
+                "opening hix_sites.tsv for rustfilt failed"
+            }
+            HeatmapError::WizDemangleTsvOutputCreateFailed => {
+                "creating hix_sites.demangled.tsv failed (create-new)"
+            }
+            HeatmapError::WizDemangleTsvStartFailed => "rustfilt could not be started for the TSV",
+            HeatmapError::WizDemangleTsvExitedWithFailure => {
+                "rustfilt reported an error for the TSV"
+            }
+            HeatmapError::WizClockBeforeEpoch => {
+                "system clock is before UNIX epoch (run record time)"
+            }
+            HeatmapError::WizWorkUnitsNotANumber => "work-unit count answer is not a whole number",
         };
         write!(formatter, "HIX-{}: {}", self.code(), description)
     }
@@ -6404,7 +6521,7 @@ fn write_text_report<W: Write>(
     .map_err(report_buffer_write_error)?;
     write_run_metadata_provenance(report_writer, inputs.run_metadata)?;
     writeln!(report_writer, "  measurement method      : LLVM source-based coverage counters (rustc -C instrument-coverage); exact counts, not samples").map_err(report_buffer_write_error)?;
-    writeln!(report_writer, "  run stop condition      : D = whenever the instrumented program exited cleanly (no in-tool cap)").map_err(report_buffer_write_error)?;
+    writeln!(report_writer, "  run stop condition      : D = until the instrumented program exited (any exit code; a killed program writes no counts); no in-tool cap").map_err(report_buffer_write_error)?;
     writeln!(report_writer, "  function count meaning  : entry count (LCOV FNDA); monomorphized instances at one source line are summed").map_err(report_buffer_write_error)?;
     writeln!(report_writer, "  loop count meaning      : loop-header line execution count (LCOV DA); approximately the iteration count").map_err(report_buffer_write_error)?;
     writeln!(report_writer, "  per-call ratio meaning  : loop count / summed entry count of nearest preceding fn definition (approximate)").map_err(report_buffer_write_error)?;
@@ -7204,26 +7321,30 @@ fn write_tsv_rows<W: Write>(
 }
 
 // ============================================================================
-// Wizard (interactive setup and run): Stage 1
+// Wizard (interactive setup and run)
 // ============================================================================
 //
 // Purpose
-//   `hix --wizard` guides a person through one count-heat run, so runs are
-//   made the same way every time and every input is written down in a
-//   config file. Stage 1 (this section) does checks and questions only:
+//   `hix --wizard` guides a person through one count-heat run, so that runs
+//   are made the same way every time and every input is written down.
+//
+//   Stage 1, checks and questions (nothing of the run is created):
 //   1. refuse root and sudo (perf access is a kernel setting, not sudo);
 //   2. check every tool HIX uses; stop if any is missing;
 //   3. report `perf_event_paranoid` (never changed, never blocks);
 //   4. choose the HIX base directory (holds `modeling_data/` and
 //      `config_files/`) and offer to create missing ones;
 //   5. use an existing config file or write a new one;
-//   6. work out the next run folder (`run_NNN_<scenario>`);
-//   7. print the planned commands, then stop.
-//   It runs no target commands and creates no run folder. Running the
-//   planned commands is Stage 2.
+//   6. work out the next run folder (`run_NNN_<scenario>`) and print the
+//      planned commands.
+//
+//   Stage 2, the run, only after "Run these steps now? y" (see the
+//   "Stage 2" subsection): run folder, run record, clean, target run,
+//   work units, LCOV export, analysis (inside this process), demangle.
+//   Every external command is shown and runs only after its own y.
 //
 // Extent of this section
-//   From this header to the closing brace of `write_planned_run_steps`.
+//   From this header to the closing brace of `execute_planned_run`.
 //
 // Input and output
 //   All question-and-answer code takes a `BufRead` (answers) and a `Write`
@@ -7239,12 +7360,14 @@ fn write_tsv_rows<W: Write>(
 //   are bounded by the MAX_* constants below.
 //
 // Memory
-//   Answers, directory listings, and tool output are small heap values
-//   (`String`, `Vec`). Answers and listings are capped by the constants
-//   below. Tool output is collected by `Command::output()` without a cap;
-//   every checked command prints a few lines.
+//   Answers, directory listings, tool output, command arguments, and run
+//   record lines are small heap values (`String`, `Vec`, `OsString`).
+//   Answers and listings are capped by the constants below. Tool output is
+//   collected by `Command::output()` without a cap; every checked command
+//   prints a few lines. Commands run in Stage 2 write to the terminal
+//   directly; HIX does not collect their output.
 //
-// Error codes: 701-729.
+// Error codes: 701-756.
 
 /// The only argument that selects the wizard.
 const WIZARD_FLAG: &str = "--wizard";
@@ -7402,23 +7525,34 @@ fn is_wizard_invocation<I: Iterator<Item = OsString>>(arguments: I) -> bool {
     first_is_wizard_flag && remaining_arguments.next().is_none()
 }
 
-/// Runs the wizard on the terminal (Stage 1: checks, questions, planned run).
+/// Runs the wizard on the terminal: Stage 1 (checks, questions, planned
+/// run), then Stage 2 (the run) if the person answers y.
 ///
 /// # Steps
-/// 1. Root/sudo check (701-704). 2. Tool checks (705). 3. perf_event_paranoid
-/// report (never fails the wizard). 4. Current directory (709).
-/// 5. The question-and-answer part, `run_wizard_setup_dialog`.
+/// 1. Root/sudo check (701-704).
+/// 2. Tool checks (705); their version lines are kept for the run record.
+/// 3. perf_event_paranoid report (never fails the wizard).
+/// 4. Current directory (709).
+/// 5. Questions and planned run (`run_wizard_setup_dialog`).
+/// 6. The run (`execute_planned_run`).
+///
+/// Standard input and output stay locked for the whole wizard. Programs
+/// started in Stage 2 use the terminal directly through their own file
+/// descriptors, and wizard output is flushed before each one, so the order
+/// on screen is kept. The in-process analysis locks stdout again on this
+/// same thread, which std allows (the stdout lock is reentrant).
 ///
 /// # Returns
-/// - `Ok(())`: the planned run was printed.
-/// - `Err`: the first stop condition's code (see the codes above).
+/// - `Ok(())`: the plan was printed and either the run completed or the
+///   person chose not to run it now.
+/// - `Err`: the first stop condition's code.
 pub fn run_wizard_cli() -> Result<(), HeatmapError> {
     let standard_output = std::io::stdout();
     let mut wizard_output = standard_output.lock();
 
     writeln!(wizard_output, "HIX wizard\n==========\n\n[checks]").map_err(wizard_output_error)?;
     check_not_running_as_root_or_sudo(&mut wizard_output)?;
-    check_required_tools(&mut wizard_output)?;
+    let tool_version_lines = check_required_tools(&mut wizard_output)?;
     report_perf_event_paranoid(&mut wizard_output)?;
 
     let current_directory = match std::env::current_dir() {
@@ -7436,7 +7570,14 @@ pub fn run_wizard_cli() -> Result<(), HeatmapError> {
 
     let standard_input = std::io::stdin();
     let mut wizard_input = standard_input.lock();
-    run_wizard_setup_dialog(&mut wizard_input, &mut wizard_output, &current_directory)
+    let planned_run =
+        run_wizard_setup_dialog(&mut wizard_input, &mut wizard_output, &current_directory)?;
+    execute_planned_run(
+        &mut wizard_input,
+        &mut wizard_output,
+        &planned_run,
+        &tool_version_lines,
+    )
 }
 
 /// Maps a failed write of wizard output to its code (one mapping for all
@@ -7545,18 +7686,33 @@ fn parse_effective_uid_from_proc_status(status_bytes: &[u8]) -> Result<u32, Heat
     }
 }
 
+/// One installed tool's reported version line, kept for the run record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolVersionLine {
+    /// The tool's label in the check list (e.g. `cargo-llvm-cov`).
+    tool_label: &'static str,
+    /// The line the check reported (e.g. `cargo-llvm-cov 0.9.1`).
+    reported_line: String,
+}
+
 /// Runs every tool check, prints one line per tool, and stops if any tool
 /// is missing.
 ///
 /// # Project context
 /// Runs before any question, so no answers are wasted on a run that cannot
-/// work. HIX never installs anything; it prints the install command.
+/// work. HIX never installs anything; it prints the install command. The
+/// version lines are returned so the run record can show which tool
+/// versions produced a run.
 ///
 /// # Returns
-/// - `Ok(())`: every tool is installed.
+/// - `Ok(lines)`: every tool is installed; one version line per tool, in
+///   check order (at most `WIZARD_TOOL_CHECK_COUNT`).
 /// - `Err(WizRequiredToolMissing)`: at least one is missing (all are listed first).
 /// - `Err(WizOutputWriteFailed)`.
-fn check_required_tools<W: Write>(wizard_output: &mut W) -> Result<(), HeatmapError> {
+fn check_required_tools<W: Write>(
+    wizard_output: &mut W,
+) -> Result<Vec<ToolVersionLine>, HeatmapError> {
+    let mut tool_version_lines: Vec<ToolVersionLine> = Vec::with_capacity(WIZARD_TOOL_CHECK_COUNT);
     let mut missing_tool_count: usize = 0;
     for tool_check in WIZARD_TOOL_CHECKS.iter() {
         let outcome = run_one_tool_check(tool_check);
@@ -7564,6 +7720,10 @@ fn check_required_tools<W: Write>(wizard_output: &mut W) -> Result<(), HeatmapEr
         let hint = tool_check.install_hint;
         let line_result = match &outcome {
             ToolCheckOutcome::Installed { reported_line } => {
+                tool_version_lines.push(ToolVersionLine {
+                    tool_label: label,
+                    reported_line: reported_line.clone(),
+                });
                 writeln!(wizard_output, "  {:<16} ok       {}", label, reported_line)
             }
             ToolCheckOutcome::NotFound => writeln!(
@@ -7601,7 +7761,7 @@ fn check_required_tools<W: Write>(wizard_output: &mut W) -> Result<(), HeatmapEr
         .map_err(wizard_output_error)?;
         return Err(HeatmapError::WizRequiredToolMissing);
     }
-    Ok(())
+    Ok(tool_version_lines)
 }
 
 /// Runs one tool check command directly (no shell; environment unchanged;
@@ -8219,20 +8379,20 @@ fn ensure_wizard_directories<R: BufRead, W: Write>(
 /// 1. Base directory: the current directory, or a typed absolute path.
 /// 2. Make sure `modeling_data/` and `config_files/` exist (offer to create).
 /// 3. Use a listed config file, or create a new one.
-/// 4. Next run folder name, from the config's `modeling_data_path`.
-/// 5. Print the planned run.
+/// 4. Next run folder, from the config's `modeling_data_path`.
+/// 5. Build the `PlannedRun` and print it.
 ///
 /// # Arguments
 /// - `current_directory`: offered as the base directory (tests pass a temp dir).
 ///
 /// # Returns
-/// - `Ok(())` after printing the planned run.
+/// - `Ok(PlannedRun)`: printed; Stage 2 (`execute_planned_run`) runs it.
 /// - `Err`: the first stop condition's code.
 fn run_wizard_setup_dialog<R: BufRead, W: Write>(
     wizard_input: &mut R,
     wizard_output: &mut W,
     current_directory: &Path,
-) -> Result<(), HeatmapError> {
+) -> Result<PlannedRun, HeatmapError> {
     writeln!(
         wizard_output,
         "\n[HIX base directory]  (holds {}/ and {}/)",
@@ -8264,7 +8424,7 @@ fn run_wizard_setup_dialog<R: BufRead, W: Write>(
     let modeling_data_directory = base_directory.join(MODELING_DATA_DIRECTORY_NAME);
     let config_directory = base_directory.join(CONFIG_FILES_DIRECTORY_NAME);
 
-    let config = choose_or_create_config(
+    let (config, config_file_name) = choose_or_create_config(
         wizard_input,
         wizard_output,
         &config_directory,
@@ -8293,82 +8453,84 @@ fn run_wizard_setup_dialog<R: BufRead, W: Write>(
             return Err(error_code);
         }
     };
-    let run_folder_name = run_folder_name_for(run_number, &config.scenario_name)?;
-    write_planned_run_steps(
-        wizard_output,
-        &config,
-        &run_folder_name,
+    let planned_run = plan_run(
+        config,
+        &config_directory,
+        &config_file_name,
+        run_number,
         &run_modeling_data_directory,
-    )
+    )?;
+    write_planned_run_steps(wizard_output, &planned_run)?;
+    Ok(planned_run)
 }
 
 /// Offers the listed config files by number, or creates a new config.
+/// With no config file in `config_files/`, a new one is created without asking.
 ///
 /// # Returns
-/// - `Ok(HixConfig)`: loaded (and fully checked by `load_config_file`) or newly written.
+/// - `Ok((config, config_file_name))`: loaded (fully checked by
+///   `load_config_file`) or newly written. The name is the file's name in
+///   `config_directory`; the run uses it for its copy and its record.
 /// - `Err` from listing, loading (the code is printed first), or `create_new_config`.
 fn choose_or_create_config<R: BufRead, W: Write>(
     wizard_input: &mut R,
     wizard_output: &mut W,
     config_directory: &Path,
     modeling_data_directory: &Path,
-) -> Result<HixConfig, HeatmapError> {
+) -> Result<(HixConfig, String), HeatmapError> {
     let config_file_names = list_config_file_names(config_directory)?;
-    if config_file_names.is_empty() {
+    let config_choice = if config_file_names.is_empty() {
         writeln!(
             wizard_output,
             "\nNo config files in {} yet: creating a new one.",
             config_directory.display()
         )
         .map_err(wizard_output_error)?;
-        return create_new_config(
-            wizard_input,
-            wizard_output,
-            config_directory,
-            modeling_data_directory,
-        );
-    }
-
-    writeln!(
-        wizard_output,
-        "\n[config files in {}]",
-        config_directory.display()
-    )
-    .map_err(wizard_output_error)?;
-    for (list_index, file_name) in config_file_names.iter().enumerate() {
+        None
+    } else {
         writeln!(
             wizard_output,
-            "  {:>3}  {}",
-            list_index.saturating_add(1),
-            file_name
+            "\n[config files in {}]",
+            config_directory.display()
         )
         .map_err(wizard_output_error)?;
-    }
-    let config_choice = ask_until_valid(
-        wizard_input,
-        wizard_output,
-        "Number of the config to use, or n for a new config",
-        None,
-        "a number from the list, or n",
-        |answer_text| parse_config_choice_answer(answer_text, &config_file_names),
-    )?;
+        for (list_index, file_name) in config_file_names.iter().enumerate() {
+            writeln!(
+                wizard_output,
+                "  {:>3}  {}",
+                list_index.saturating_add(1),
+                file_name
+            )
+            .map_err(wizard_output_error)?;
+        }
+        ask_until_valid(
+            wizard_input,
+            wizard_output,
+            "Number of the config to use, or n for a new config",
+            None,
+            "a number from the list, or n",
+            |answer_text| parse_config_choice_answer(answer_text, &config_file_names),
+        )?
+    };
 
     let chosen_file_name = match config_choice {
         Some(file_name) => file_name,
         None => {
-            return create_new_config(
+            let config = create_new_config(
                 wizard_input,
                 wizard_output,
                 config_directory,
                 modeling_data_directory,
-            );
+            )?;
+            let config_file_name = config_file_name_for_scenario(&config.scenario_name)?;
+            return Ok((config, config_file_name));
         }
     };
     let config_file_path = AbsolutePath::ap_new(config_directory.join(&chosen_file_name))?;
     match load_config_file(&config_file_path) {
         Ok(config) => {
             writeln!(wizard_output, "  using {}", chosen_file_name).map_err(wizard_output_error)?;
-            Ok(config)
+            Ok((config, chosen_file_name))
         }
         Err(error_code) => {
             writeln!(
@@ -8503,40 +8665,29 @@ fn create_new_config<R: BufRead, W: Write>(
     Ok(config)
 }
 
-/// Prints the planned run as exact commands with absolute paths.
-///
-/// Stage 1 runs none of them. They are what Stage 2 will run, in this order,
-/// and a person can also type them by hand.
+/// Prints the planned run: run folder, run record, and the exact commands
+/// with absolute paths, built by the same functions that Stage 2 uses to run
+/// them (so the plan and the run cannot differ).
 ///
 /// # Returns
 /// - `Ok(())`.
 /// - `Err(WizOutputWriteFailed)`, or a field recheck code.
 fn write_planned_run_steps<W: Write>(
     wizard_output: &mut W,
-    config: &HixConfig,
-    run_folder_name: &RunLabel,
-    modeling_data_directory: &Path,
+    planned_run: &PlannedRun,
 ) -> Result<(), HeatmapError> {
-    let run_folder_text = run_folder_name.rl_get()?;
-    let run_folder_path = modeling_data_directory.join(run_folder_text);
-    let lcov_file_path = run_folder_path.join(format!("{}.lcov", run_folder_text));
-    let analysis_folder_name = format!(
-        "{}{:03}_{}",
-        ANALYSIS_FOLDER_NAME_PREFIX,
-        FIRST_ANALYSIS_NUMBER,
-        config.analysis_purpose.apu_get()?
-    );
-    let analysis_folder_path = run_folder_path.join(&analysis_folder_name);
-
+    let config = &planned_run.config;
+    writeln!(wizard_output, "\n[planned run]").map_err(wizard_output_error)?;
     writeln!(
         wizard_output,
-        "\n[planned run]  (nothing below has been run; running is the next wizard stage)"
+        "  run folder (HIX creates it): {}",
+        planned_run.run_folder_path.display()
     )
     .map_err(wizard_output_error)?;
     writeln!(
         wizard_output,
-        "  run folder (HIX creates it): {}",
-        run_folder_path.display()
+        "  run record:                  {}",
+        planned_run.run_record_path.display()
     )
     .map_err(wizard_output_error)?;
     writeln!(
@@ -8545,11 +8696,16 @@ fn write_planned_run_steps<W: Write>(
         config.target_crate_path.cfp_get()?
     )
     .map_err(wizard_output_error)?;
-    writeln!(wizard_output, "    cargo llvm-cov clean --workspace").map_err(wizard_output_error)?;
     writeln!(
         wizard_output,
-        "    cargo llvm-cov run --release --no-report --bin {}",
-        config.target_binary_name.cbn_get()?
+        "    {}",
+        command_display_text(CARGO_PROGRAM_NAME, &clean_command_arguments())
+    )
+    .map_err(wizard_output_error)?;
+    writeln!(
+        wizard_output,
+        "    {}",
+        command_display_text(CARGO_PROGRAM_NAME, &target_run_command_arguments(config)?)
     )
     .map_err(wizard_output_error)?;
     writeln!(
@@ -8559,17 +8715,22 @@ fn write_planned_run_steps<W: Write>(
     .map_err(wizard_output_error)?;
     writeln!(
         wizard_output,
-        "    cargo llvm-cov report --release --lcov --output-path {}",
-        lcov_file_path.display()
+        "    {}",
+        command_display_text(
+            CARGO_PROGRAM_NAME,
+            &lcov_export_command_arguments(planned_run)
+        )
     )
     .map_err(wizard_output_error)?;
+
+    let analysis_arguments = analysis_command_arguments(planned_run, None)?;
     write!(
         wizard_output,
-        "  analysis:\n    hix --lcov {} --out-dir {} --top-n {} --run-label {}",
-        lcov_file_path.display(),
-        analysis_folder_path.display(),
-        config.top_n.tnc_get()?,
-        run_folder_text
+        "  analysis (runs inside this HIX process; same as):\n    {}",
+        command_display_text(
+            ANALYSIS_PROGRAM_NAME,
+            analysis_arguments.get(1..).unwrap_or(&[])
+        )
     )
     .map_err(wizard_output_error)?;
     if let Some(work_unit_name) = &config.work_unit_name {
@@ -8581,21 +8742,1036 @@ fn write_planned_run_steps<W: Write>(
         .map_err(wizard_output_error)?;
     }
     writeln!(wizard_output).map_err(wizard_output_error)?;
+
     if config.demangle_outputs {
         writeln!(
             wizard_output,
             "  demangle:\n    rustfilt < {} > {}\n    rustfilt < {} > {}",
-            analysis_folder_path.join(REPORT_FILE_NAME).display(),
-            analysis_folder_path
-                .join(DEMANGLED_REPORT_FILE_NAME)
-                .display(),
-            analysis_folder_path.join(SITES_TSV_FILE_NAME).display(),
-            analysis_folder_path
-                .join(DEMANGLED_SITES_TSV_FILE_NAME)
-                .display()
+            planned_run.report_file_path.display(),
+            planned_run.demangled_report_file_path.display(),
+            planned_run.sites_tsv_file_path.display(),
+            planned_run.demangled_sites_tsv_file_path.display()
         )
         .map_err(wizard_output_error)?;
     }
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Stage 2: the run
+// ----------------------------------------------------------------------------
+//
+// Order (each step's facts are appended to the run record as it completes):
+//   1. "Run these steps now?" n: stop normally (Ok); nothing is created.
+//   2. Create the run folder (`create_dir`; an existing folder stops the
+//      run), the run record, and a byte-for-byte copy of the config file.
+//   3. Clean: `cargo llvm-cov clean --workspace` (after y).
+//   4. Target run: `cargo llvm-cov run --release --no-report --bin <name>`
+//      (after y), with the terminal attached, so the program's own console
+//      works. Start and end unix times and the elapsed seconds are recorded.
+//      The elapsed time includes the build (cargo-llvm-cov has no
+//      build-only step), so it is not passed to the report as a run duration.
+//   5. Work units (only if the config names a work unit; empty skips).
+//   6. LCOV export: `cargo llvm-cov report --release --lcov --output-path ...`
+//      (after y; if the target run did not exit with code 0, the question
+//      says so).
+//   7. Analysis inside this process: the argument list a person would type
+//      goes through `parse_cli_arguments` and `run_heatmap_with_configuration`,
+//      so there is one validation path.
+//   8. Demangle (if the config asks; after y; may be declined): `rustfilt`
+//      with stdin from the report (then the TSV) and stdout to a new file.
+//
+// Stopping
+//   Declining a step after the run folder exists stops with that step's
+//   code; the run folder and record stay (HIX never deletes), and the
+//   record shows how far the run got. Ctrl-C during the target run ends HIX
+//   too (both share the terminal): the record then ends after the target-run
+//   start time.
+//
+// Run record (`hix_run_record.toml`)
+//   TOML subset, one `key = value` per line, each key written at most once.
+//   For every line the file is opened, appended to, synced, and closed, so
+//   it is never held open during the run and a crash loses at most the line
+//   being written. Text values are quoted, with `"`, `\`, and control
+//   characters replaced by `?`, so the existing field reader can read any
+//   line back. Exit status: `<step>_exit_code = N`, or
+//   `<step>_ended_by_signal = true` when the program was killed.
+
+/// Run record file name, inside each run folder.
+const RUN_RECORD_FILE_NAME: &str = "hix_run_record.toml";
+
+/// Format version, written as the run record's first field. Raise it when
+/// keys change meaning.
+const RUN_RECORD_FORMAT_VERSION: u32 = 1;
+
+/// Programs run directly (no shell), found through PATH.
+const CARGO_PROGRAM_NAME: &str = "cargo";
+const RUSTFILT_PROGRAM_NAME: &str = "rustfilt";
+
+/// First entry of the in-process analysis argument list; `parse_cli_arguments`
+/// skips it, as it skips the program name. Also shown in the plan.
+const ANALYSIS_PROGRAM_NAME: &str = "hix";
+
+/// System facts for the run record. Read only; a failure is recorded as
+/// "unknown" and the run continues.
+const OS_RELEASE_PATH: &str = "/etc/os-release";
+const OS_RELEASE_PRETTY_NAME_KEY: &str = "PRETTY_NAME";
+const OS_PRETTY_NAME_BUFFER_BYTES: usize = 256;
+const KERNEL_RELEASE_PATH: &str = "/proc/sys/kernel/osrelease";
+const MAX_KERNEL_RELEASE_BYTES: usize = 256;
+
+/// One planned run: the config and every path the run uses.
+///
+/// Built once by `plan_run`. The printed plan (`write_planned_run_steps`)
+/// and the executed steps (`execute_planned_run`) both read it, so what is
+/// shown is exactly what runs.
+#[derive(Debug)]
+struct PlannedRun {
+    config: HixConfig,
+    /// The config file used, in `config_files/`.
+    config_file_path: PathBuf,
+    /// Byte-for-byte copy of the config file, inside the run folder.
+    config_copy_path: PathBuf,
+    /// `run_NNN_<scenario>`; also the analysis `--run-label`.
+    run_folder_name: RunLabel,
+    run_folder_path: PathBuf,
+    run_record_path: PathBuf,
+    /// `<run folder>/<run folder name>.lcov`.
+    lcov_file_path: PathBuf,
+    /// `<run folder>/analysis_001_<purpose>` (created by the analysis).
+    analysis_folder_path: PathBuf,
+    report_file_path: PathBuf,
+    sites_tsv_file_path: PathBuf,
+    demangled_report_file_path: PathBuf,
+    demangled_sites_tsv_file_path: PathBuf,
+}
+
+/// Builds the `PlannedRun` for run number `run_number`.
+///
+/// # Returns
+/// - `Ok(PlannedRun)`.
+/// - `Err(TypeScenarioNameCorrupted | TypeRunLabelInvalid |
+///   TypeAnalysisPurposeCorrupted)` from the name rechecks.
+fn plan_run(
+    config: HixConfig,
+    config_directory: &Path,
+    config_file_name: &str,
+    run_number: u32,
+    modeling_data_directory: &Path,
+) -> Result<PlannedRun, HeatmapError> {
+    let run_folder_name = run_folder_name_for(run_number, &config.scenario_name)?;
+    let run_folder_text = run_folder_name.rl_get()?.to_string();
+    let run_folder_path = modeling_data_directory.join(&run_folder_text);
+    let analysis_folder_name = format!(
+        "{}{:03}_{}",
+        ANALYSIS_FOLDER_NAME_PREFIX,
+        FIRST_ANALYSIS_NUMBER,
+        config.analysis_purpose.apu_get()?
+    );
+    let analysis_folder_path = run_folder_path.join(analysis_folder_name);
+    // Field expressions run in the order written: every path built from
+    // `analysis_folder_path` or `run_folder_path` comes before their moves.
+    Ok(PlannedRun {
+        config_file_path: config_directory.join(config_file_name),
+        config_copy_path: run_folder_path.join(config_file_name),
+        run_record_path: run_folder_path.join(RUN_RECORD_FILE_NAME),
+        lcov_file_path: run_folder_path.join(format!("{}.lcov", run_folder_text)),
+        report_file_path: analysis_folder_path.join(REPORT_FILE_NAME),
+        sites_tsv_file_path: analysis_folder_path.join(SITES_TSV_FILE_NAME),
+        demangled_report_file_path: analysis_folder_path.join(DEMANGLED_REPORT_FILE_NAME),
+        demangled_sites_tsv_file_path: analysis_folder_path.join(DEMANGLED_SITES_TSV_FILE_NAME),
+        analysis_folder_path,
+        run_folder_path,
+        run_folder_name,
+        config,
+    })
+}
+
+// --- Command argument lists (one source for both the plan and the run) ---
+
+/// `cargo llvm-cov clean --workspace` (arguments after `cargo`).
+fn clean_command_arguments() -> Vec<OsString> {
+    vec![
+        OsString::from("llvm-cov"),
+        OsString::from("clean"),
+        OsString::from("--workspace"),
+    ]
+}
+
+/// `cargo llvm-cov run --release --no-report --bin <name>` (arguments after `cargo`).
+/// `Err(TypeCargoBinaryNameCorrupted)` from the name's recheck.
+fn target_run_command_arguments(config: &HixConfig) -> Result<Vec<OsString>, HeatmapError> {
+    Ok(vec![
+        OsString::from("llvm-cov"),
+        OsString::from("run"),
+        OsString::from("--release"),
+        OsString::from("--no-report"),
+        OsString::from("--bin"),
+        OsString::from(config.target_binary_name.cbn_get()?),
+    ])
+}
+
+/// `cargo llvm-cov report --release --lcov --output-path <lcov>` (arguments after `cargo`).
+fn lcov_export_command_arguments(planned_run: &PlannedRun) -> Vec<OsString> {
+    vec![
+        OsString::from("llvm-cov"),
+        OsString::from("report"),
+        OsString::from("--release"),
+        OsString::from("--lcov"),
+        OsString::from("--output-path"),
+        planned_run.lcov_file_path.clone().into_os_string(),
+    ]
+}
+
+/// The analysis argument list, starting with `ANALYSIS_PROGRAM_NAME` (skipped
+/// by `parse_cli_arguments`, as the program name is). Work units are added
+/// only when a count was entered and the config names a work unit.
+///
+/// # Returns
+/// - `Ok(arguments)`.
+/// - `Err` from the rechecks of top_n, the run label, or the work-unit values.
+fn analysis_command_arguments(
+    planned_run: &PlannedRun,
+    work_unit_count: Option<WorkUnitCount>,
+) -> Result<Vec<OsString>, HeatmapError> {
+    let config = &planned_run.config;
+    let mut arguments: Vec<OsString> = vec![
+        OsString::from(ANALYSIS_PROGRAM_NAME),
+        OsString::from("--lcov"),
+        planned_run.lcov_file_path.clone().into_os_string(),
+        OsString::from("--out-dir"),
+        planned_run.analysis_folder_path.clone().into_os_string(),
+        OsString::from("--top-n"),
+        OsString::from(config.top_n.tnc_get()?.to_string()),
+        OsString::from("--run-label"),
+        OsString::from(planned_run.run_folder_name.rl_get()?),
+    ];
+    if let (Some(count), Some(work_unit_name)) = (work_unit_count, &config.work_unit_name) {
+        arguments.push(OsString::from("--work-units"));
+        arguments.push(OsString::from(count.wuc_get()?.to_string()));
+        arguments.push(OsString::from("--work-unit-name"));
+        arguments.push(OsString::from(work_unit_name.wun_get()?));
+    }
+    Ok(arguments)
+}
+
+/// A command as shown to the person: program name and arguments separated
+/// by spaces (display only; arguments are passed to the program unchanged).
+fn command_display_text(program_name: &str, arguments: &[OsString]) -> String {
+    let mut display_text = String::from(program_name);
+    for argument in arguments.iter() {
+        display_text.push(' ');
+        display_text.push_str(&argument.to_string_lossy());
+    }
+    display_text
+}
+
+// --- Run folder, run record, config copy ---
+
+/// Creates the run folder; it must not exist yet (run folders are a record).
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(WizRunFolderAppeared)`: something exists at that path.
+/// - `Err(WizRunFolderCreateFailed)`: any other failure.
+fn create_run_folder(run_folder_path: &Path) -> Result<(), HeatmapError> {
+    match fs::create_dir(run_folder_path) {
+        Ok(()) => Ok(()),
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::AlreadyExists => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: run folder exists: {}",
+                HeatmapError::WizRunFolderAppeared.code(),
+                run_folder_path.display()
+            );
+            Err(HeatmapError::WizRunFolderAppeared)
+        }
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: create {} failed: {}",
+                HeatmapError::WizRunFolderCreateFailed.code(),
+                run_folder_path.display(),
+                _io_error
+            );
+            Err(HeatmapError::WizRunFolderCreateFailed)
+        }
+    }
+}
+
+/// Creates the empty run record file (create-new; never overwrites).
+/// `Err(WizRunRecordCreateFailed)`.
+fn create_run_record(run_record_path: &Path) -> Result<(), HeatmapError> {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(run_record_path)
+    {
+        Ok(_new_record_file) => Ok(()),
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: create {} failed: {}",
+                HeatmapError::WizRunRecordCreateFailed.code(),
+                run_record_path.display(),
+                _io_error
+            );
+            Err(HeatmapError::WizRunRecordCreateFailed)
+        }
+    }
+}
+
+/// Appends `key = value` (one line) to the run record, syncs, and closes it.
+///
+/// `record_value` is written exactly as given: text values must come from
+/// `quoted_run_record_text`; numbers and booleans are written bare.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(WizRunRecordOpenFailed | WizRunRecordWriteFailed | WizRunRecordSyncFailed)`.
+fn append_run_record_field(
+    run_record_path: &Path,
+    record_key: &str,
+    record_value: &str,
+) -> Result<(), HeatmapError> {
+    let mut record_line = String::with_capacity(
+        record_key
+            .len()
+            .saturating_add(record_value.len())
+            .saturating_add(4),
+    );
+    record_line.push_str(record_key);
+    record_line.push_str(" = ");
+    record_line.push_str(record_value);
+    record_line.push('\n');
+
+    let mut record_file = match OpenOptions::new().append(true).open(run_record_path) {
+        Ok(file) => file,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: open {} for append failed: {}",
+                HeatmapError::WizRunRecordOpenFailed.code(),
+                run_record_path.display(),
+                _io_error
+            );
+            return Err(HeatmapError::WizRunRecordOpenFailed);
+        }
+    };
+    if let Err(_io_error) = record_file.write_all(record_line.as_bytes()) {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: run record write failed: {}",
+            HeatmapError::WizRunRecordWriteFailed.code(),
+            _io_error
+        );
+        return Err(HeatmapError::WizRunRecordWriteFailed);
+    }
+    if let Err(_io_error) = record_file.sync_all() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: run record sync failed: {}",
+            HeatmapError::WizRunRecordSyncFailed.code(),
+            _io_error
+        );
+        return Err(HeatmapError::WizRunRecordSyncFailed);
+    }
+    Ok(())
+}
+
+/// Quotes `raw_text` for the run record, replacing `"`, `\`, and control
+/// characters with `?`, so the field reader reads the value back as one line.
+fn quoted_run_record_text(raw_text: &str) -> String {
+    let mut quoted_text = String::with_capacity(raw_text.len().saturating_add(2));
+    quoted_text.push('"');
+    for character in raw_text.chars() {
+        if character == '"' || character == '\\' || character.is_control() {
+            quoted_text.push('?');
+        } else {
+            quoted_text.push(character);
+        }
+    }
+    quoted_text.push('"');
+    quoted_text
+}
+
+/// Current time in whole seconds since the UNIX epoch.
+/// `Err(WizClockBeforeEpoch)`.
+fn current_unix_seconds() -> Result<u64, HeatmapError> {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => Ok(duration.as_secs()),
+        Err(_clock_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: clock before epoch: {}",
+                HeatmapError::WizClockBeforeEpoch.code(),
+                _clock_error
+            );
+            Err(HeatmapError::WizClockBeforeEpoch)
+        }
+    }
+}
+
+/// `PRETTY_NAME` from `/etc/os-release` (e.g. `Fedora Linux 45 (Workstation
+/// Edition)`), read with the no-heap field reader. Informational: any
+/// failure gives "unknown (HIX code N)" and the run continues (Tier 2).
+fn read_os_pretty_name() -> String {
+    match read_single_line_field_from_toml_no_heap::<OS_PRETTY_NAME_BUFFER_BYTES>(
+        Path::new(OS_RELEASE_PATH),
+        OS_RELEASE_PRETTY_NAME_KEY,
+    ) {
+        Ok((value_buffer, value_length)) => match value_buffer.get(..value_length) {
+            Some(value_bytes) => String::from_utf8_lossy(value_bytes).into_owned(),
+            None => String::from("unknown (length outside buffer)"),
+        },
+        Err(error_code) => format!("unknown (HIX code {})", error_code.code()),
+    }
+}
+
+/// Kernel release from `/proc/sys/kernel/osrelease` (e.g.
+/// `7.3.3-300.fc45.x86_64`). Informational: any failure gives "unknown ..."
+/// and the run continues (Tier 2).
+fn read_kernel_release() -> String {
+    match fs::read(KERNEL_RELEASE_PATH) {
+        Ok(release_bytes) if release_bytes.len() <= MAX_KERNEL_RELEASE_BYTES => {
+            String::from_utf8_lossy(&release_bytes).trim().to_string()
+        }
+        Ok(_too_long) => String::from("unknown (longer than MAX_KERNEL_RELEASE_BYTES)"),
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!("read {} failed: {}", KERNEL_RELEASE_PATH, _io_error);
+            String::from("unknown (could not be read)")
+        }
+    }
+}
+
+/// Writes the first record fields: format version, run folder, config file,
+/// creation time, operating system, kernel, and every tool version line.
+/// Errors: from `append_run_record_field` and `current_unix_seconds`, or a
+/// run-label recheck.
+fn write_run_record_header(
+    run_record_path: &Path,
+    planned_run: &PlannedRun,
+    tool_version_lines: &[ToolVersionLine],
+) -> Result<(), HeatmapError> {
+    append_run_record_field(
+        run_record_path,
+        "hix_run_record_version",
+        &RUN_RECORD_FORMAT_VERSION.to_string(),
+    )?;
+    append_run_record_field(
+        run_record_path,
+        "run_folder",
+        &quoted_run_record_text(planned_run.run_folder_name.rl_get()?),
+    )?;
+    append_run_record_field(
+        run_record_path,
+        "config_file",
+        &quoted_run_record_text(&planned_run.config_file_path.to_string_lossy()),
+    )?;
+    append_run_record_field(
+        run_record_path,
+        "record_created_unix_seconds",
+        &current_unix_seconds()?.to_string(),
+    )?;
+    append_run_record_field(
+        run_record_path,
+        "os_pretty_name",
+        &quoted_run_record_text(&read_os_pretty_name()),
+    )?;
+    append_run_record_field(
+        run_record_path,
+        "kernel_release",
+        &quoted_run_record_text(&read_kernel_release()),
+    )?;
+    for tool_version_line in tool_version_lines.iter() {
+        let record_key = format!("tool_{}", tool_version_line.tool_label.replace('-', "_"));
+        append_run_record_field(
+            run_record_path,
+            &record_key,
+            &quoted_run_record_text(&tool_version_line.reported_line),
+        )?;
+    }
+    Ok(())
+}
+
+/// Copies the config file byte for byte into the run folder (create-new).
+/// The copy is not synced: if it is lost, the original is in `config_files/`.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err(WizConfigCopyReadFailed | WizConfigCopyCreateFailed | WizConfigCopyWriteFailed)`.
+fn copy_config_file_into_run_folder(
+    config_file_path: &Path,
+    config_copy_path: &Path,
+) -> Result<(), HeatmapError> {
+    let config_bytes = match fs::read(config_file_path) {
+        Ok(bytes) => bytes,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: read {} failed: {}",
+                HeatmapError::WizConfigCopyReadFailed.code(),
+                config_file_path.display(),
+                _io_error
+            );
+            return Err(HeatmapError::WizConfigCopyReadFailed);
+        }
+    };
+    let mut copy_file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(config_copy_path)
+    {
+        Ok(file) => file,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: create {} failed: {}",
+                HeatmapError::WizConfigCopyCreateFailed.code(),
+                config_copy_path.display(),
+                _io_error
+            );
+            return Err(HeatmapError::WizConfigCopyCreateFailed);
+        }
+    };
+    if let Err(_io_error) = copy_file.write_all(&config_bytes) {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "HIX-{}: write {} failed: {}",
+            HeatmapError::WizConfigCopyWriteFailed.code(),
+            config_copy_path.display(),
+            _io_error
+        );
+        return Err(HeatmapError::WizConfigCopyWriteFailed);
+    }
+    Ok(())
+}
+
+// --- External commands ---
+
+/// One external command step: what runs, where, and its own codes.
+/// No `Debug` derive: `HeatmapError` has no `Debug` in production-release builds.
+struct ExternalCommandStep<'directory> {
+    /// Record key prefix, e.g. `clean` (gives `clean_exit_code`).
+    step_key: &'static str,
+    program_name: &'static str,
+    program_arguments: Vec<OsString>,
+    working_directory: &'directory Path,
+    /// Returned when the person answers n.
+    declined_code: HeatmapError,
+    /// Returned when the program cannot be started.
+    start_failed_code: HeatmapError,
+}
+
+/// Shows the command and where it runs, then asks `question_text`.
+///
+/// # Returns
+/// - `Ok(())` for y.
+/// - `Err(step.declined_code)` for n, after recording `<step>_declined = true`.
+/// - `Err` from answers, output, or the record.
+fn confirm_external_command_step<R: BufRead, W: Write>(
+    wizard_input: &mut R,
+    wizard_output: &mut W,
+    run_record_path: &Path,
+    command_step: &ExternalCommandStep<'_>,
+    question_text: &str,
+) -> Result<(), HeatmapError> {
+    writeln!(
+        wizard_output,
+        "\n  in {}:\n    {}",
+        command_step.working_directory.display(),
+        command_display_text(command_step.program_name, &command_step.program_arguments)
+    )
+    .map_err(wizard_output_error)?;
+    if ask_yes_no(wizard_input, wizard_output, question_text)? {
+        return Ok(());
+    }
+    append_run_record_field(
+        run_record_path,
+        &format!("{}_declined", command_step.step_key),
+        "true",
+    )?;
+    writeln!(
+        wizard_output,
+        "Stopped. The run folder and its run record stay in place (HIX never deletes)."
+    )
+    .map_err(wizard_output_error)?;
+    Err(command_step.declined_code)
+}
+
+/// Runs the step's program directly (no shell; environment unchanged) in its
+/// working directory, with the terminal attached, and waits for it to end.
+/// Wizard output is flushed first, so the order on screen is kept.
+///
+/// # Returns
+/// - `Ok(exit_status)`: the program ran (any exit status).
+/// - `Err(step.start_failed_code)`: it could not be started (program not
+///   found, or the working directory does not exist).
+/// - `Err(WizOutputWriteFailed)`.
+fn run_external_command_step<W: Write>(
+    wizard_output: &mut W,
+    command_step: &ExternalCommandStep<'_>,
+) -> Result<std::process::ExitStatus, HeatmapError> {
+    wizard_output.flush().map_err(wizard_output_error)?;
+    match std::process::Command::new(command_step.program_name)
+        .args(&command_step.program_arguments)
+        .current_dir(command_step.working_directory)
+        .status()
+    {
+        Ok(exit_status) => Ok(exit_status),
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: {} could not be started in {}: {}",
+                command_step.start_failed_code.code(),
+                command_step.program_name,
+                command_step.working_directory.display(),
+                _io_error
+            );
+            writeln!(
+                wizard_output,
+                "  could not start {} in {} (HIX code {})",
+                command_step.program_name,
+                command_step.working_directory.display(),
+                command_step.start_failed_code.code()
+            )
+            .map_err(wizard_output_error)?;
+            Err(command_step.start_failed_code)
+        }
+    }
+}
+
+/// Exit status as shown to the person: `exit code N` or `ended by a signal`.
+fn exit_status_text(exit_status: std::process::ExitStatus) -> String {
+    match exit_status.code() {
+        Some(exit_code) => format!("exit code {}", exit_code),
+        None => String::from("ended by a signal"),
+    }
+}
+
+/// Records an exit status: `<step>_exit_code = N`, or
+/// `<step>_ended_by_signal = true`. Errors: from `append_run_record_field`.
+fn append_exit_status_to_run_record(
+    run_record_path: &Path,
+    step_key: &str,
+    exit_status: std::process::ExitStatus,
+) -> Result<(), HeatmapError> {
+    match exit_status.code() {
+        Some(exit_code) => append_run_record_field(
+            run_record_path,
+            &format!("{}_exit_code", step_key),
+            &exit_code.to_string(),
+        ),
+        None => append_run_record_field(
+            run_record_path,
+            &format!("{}_ended_by_signal", step_key),
+            "true",
+        ),
+    }
+}
+
+/// Codes for one demangle (one input file), so each detection site is unique.
+#[derive(Clone, Copy)]
+struct DemangleCodes {
+    input_open_failed: HeatmapError,
+    output_create_failed: HeatmapError,
+    start_failed: HeatmapError,
+    exited_with_failure: HeatmapError,
+}
+
+const REPORT_DEMANGLE_CODES: DemangleCodes = DemangleCodes {
+    input_open_failed: HeatmapError::WizDemangleReportInputOpenFailed,
+    output_create_failed: HeatmapError::WizDemangleReportOutputCreateFailed,
+    start_failed: HeatmapError::WizDemangleReportStartFailed,
+    exited_with_failure: HeatmapError::WizDemangleReportExitedWithFailure,
+};
+
+const SITES_TSV_DEMANGLE_CODES: DemangleCodes = DemangleCodes {
+    input_open_failed: HeatmapError::WizDemangleTsvInputOpenFailed,
+    output_create_failed: HeatmapError::WizDemangleTsvOutputCreateFailed,
+    start_failed: HeatmapError::WizDemangleTsvStartFailed,
+    exited_with_failure: HeatmapError::WizDemangleTsvExitedWithFailure,
+};
+
+/// Runs `rustfilt < input > output` without a shell: the input file is
+/// rustfilt's stdin, and a newly created output file (create-new) is its
+/// stdout. The exit status is recorded under `step_key`.
+///
+/// # Returns
+/// - `Ok(())`.
+/// - `Err` with the matching code from `codes`, or a record/output error.
+fn demangle_file_with_rustfilt<W: Write>(
+    wizard_output: &mut W,
+    input_file_path: &Path,
+    output_file_path: &Path,
+    codes: DemangleCodes,
+    run_record_path: &Path,
+    step_key: &str,
+) -> Result<(), HeatmapError> {
+    writeln!(
+        wizard_output,
+        "    {} < {} > {}",
+        RUSTFILT_PROGRAM_NAME,
+        input_file_path.display(),
+        output_file_path.display()
+    )
+    .map_err(wizard_output_error)?;
+    wizard_output.flush().map_err(wizard_output_error)?;
+
+    let input_file = match File::open(input_file_path) {
+        Ok(file) => file,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: open {} failed: {}",
+                codes.input_open_failed.code(),
+                input_file_path.display(),
+                _io_error
+            );
+            return Err(codes.input_open_failed);
+        }
+    };
+    let output_file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_file_path)
+    {
+        Ok(file) => file,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: create {} failed: {}",
+                codes.output_create_failed.code(),
+                output_file_path.display(),
+                _io_error
+            );
+            return Err(codes.output_create_failed);
+        }
+    };
+    let exit_status = match std::process::Command::new(RUSTFILT_PROGRAM_NAME)
+        .stdin(std::process::Stdio::from(input_file))
+        .stdout(std::process::Stdio::from(output_file))
+        .status()
+    {
+        Ok(status) => status,
+        Err(_io_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: rustfilt could not be started: {}",
+                codes.start_failed.code(),
+                _io_error
+            );
+            return Err(codes.start_failed);
+        }
+    };
+    append_exit_status_to_run_record(run_record_path, step_key, exit_status)?;
+    if !exit_status.success() {
+        writeln!(
+            wizard_output,
+            "  rustfilt failed: {}",
+            exit_status_text(exit_status)
+        )
+        .map_err(wizard_output_error)?;
+        return Err(codes.exited_with_failure);
+    }
+    Ok(())
+}
+
+/// Work-unit count answer: empty skips; otherwise a whole number in
+/// 1..=`MAX_WORK_UNITS`.
+///
+/// # Returns
+/// - `Ok(None)` for empty, `Ok(Some(count))` for a valid number.
+/// - `Err(WizWorkUnitsNotANumber)` (input validation).
+/// - `Err(TypeWorkUnitsOutOfRange)` from `wuc_new`.
+fn parse_optional_work_unit_count_answer(
+    answer_text: &str,
+) -> Result<Option<WorkUnitCount>, HeatmapError> {
+    if answer_text.is_empty() {
+        return Ok(None);
+    }
+    let count_value = match answer_text.parse::<u64>() {
+        Ok(value) => value,
+        Err(_parse_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: work units {:?}: {}",
+                HeatmapError::WizWorkUnitsNotANumber.code(),
+                answer_text,
+                _parse_error
+            );
+            return Err(HeatmapError::WizWorkUnitsNotANumber);
+        }
+    };
+    Ok(Some(WorkUnitCount::wuc_new(count_value)?))
+}
+
+/// Stage 2: runs the planned run (see the "Stage 2" subsection comment for
+/// the order of steps, stopping rules, and the run record).
+///
+/// # Arguments
+/// - `planned_run`: from `run_wizard_setup_dialog`.
+/// - `tool_version_lines`: from `check_required_tools` (written to the record).
+///
+/// # Returns
+/// - `Ok(())`: the run completed, or the person answered n to
+///   "Run these steps now?" (nothing created).
+/// - `Err`: the stopping step's code (730-756), or an analysis code
+///   (also recorded as `analysis_error_code`).
+fn execute_planned_run<R: BufRead, W: Write>(
+    wizard_input: &mut R,
+    wizard_output: &mut W,
+    planned_run: &PlannedRun,
+    tool_version_lines: &[ToolVersionLine],
+) -> Result<(), HeatmapError> {
+    writeln!(wizard_output).map_err(wizard_output_error)?;
+    if !ask_yes_no(wizard_input, wizard_output, "Run these steps now?")? {
+        writeln!(
+            wizard_output,
+            "Not run. Nothing was created for this run; the config file is kept and can be chosen next time."
+        )
+        .map_err(wizard_output_error)?;
+        return Ok(());
+    }
+
+    let config = &planned_run.config;
+    let run_record_path = planned_run.run_record_path.as_path();
+    let crate_directory = PathBuf::from(config.target_crate_path.cfp_get()?);
+
+    // Step 2: run folder, run record, config copy.
+    create_run_folder(&planned_run.run_folder_path)?;
+    create_run_record(run_record_path)?;
+    write_run_record_header(run_record_path, planned_run, tool_version_lines)?;
+    copy_config_file_into_run_folder(&planned_run.config_file_path, &planned_run.config_copy_path)?;
+    append_run_record_field(
+        run_record_path,
+        "config_copy",
+        &quoted_run_record_text(&planned_run.config_copy_path.to_string_lossy()),
+    )?;
+    writeln!(
+        wizard_output,
+        "\n[run]\n  created {}",
+        planned_run.run_folder_path.display()
+    )
+    .map_err(wizard_output_error)?;
+
+    // Step 3: clean.
+    let clean_step = ExternalCommandStep {
+        step_key: "clean",
+        program_name: CARGO_PROGRAM_NAME,
+        program_arguments: clean_command_arguments(),
+        working_directory: &crate_directory,
+        declined_code: HeatmapError::WizCleanDeclined,
+        start_failed_code: HeatmapError::WizCleanStartFailed,
+    };
+    confirm_external_command_step(
+        wizard_input,
+        wizard_output,
+        run_record_path,
+        &clean_step,
+        "Run this command?",
+    )?;
+    let clean_status = run_external_command_step(wizard_output, &clean_step)?;
+    append_exit_status_to_run_record(run_record_path, clean_step.step_key, clean_status)?;
+    if !clean_status.success() {
+        writeln!(
+            wizard_output,
+            "  clean failed: {}",
+            exit_status_text(clean_status)
+        )
+        .map_err(wizard_output_error)?;
+        return Err(HeatmapError::WizCleanExitedWithFailure);
+    }
+
+    // Step 4: target run (terminal attached; timed, including the build).
+    let target_run_step = ExternalCommandStep {
+        step_key: "target_run",
+        program_name: CARGO_PROGRAM_NAME,
+        program_arguments: target_run_command_arguments(config)?,
+        working_directory: &crate_directory,
+        declined_code: HeatmapError::WizTargetRunDeclined,
+        start_failed_code: HeatmapError::WizTargetRunStartFailed,
+    };
+    writeln!(
+        wizard_output,
+        "\n  The program is built first, then started. Use it for your scenario, then stop it\n  with its own command (Pumpkin: stop). Do not press Ctrl-C: it stops HIX too,\n  and the coverage data may not be written."
+    )
+    .map_err(wizard_output_error)?;
+    confirm_external_command_step(
+        wizard_input,
+        wizard_output,
+        run_record_path,
+        &target_run_step,
+        "Build and start the program now?",
+    )?;
+    let start_unix_seconds = current_unix_seconds()?;
+    append_run_record_field(
+        run_record_path,
+        "target_run_start_unix_seconds",
+        &start_unix_seconds.to_string(),
+    )?;
+    let run_start_instant = std::time::Instant::now();
+    let target_run_status = run_external_command_step(wizard_output, &target_run_step)?;
+    let elapsed_seconds = run_start_instant.elapsed().as_secs();
+    let end_unix_seconds = current_unix_seconds()?;
+    append_run_record_field(
+        run_record_path,
+        "target_run_end_unix_seconds",
+        &end_unix_seconds.to_string(),
+    )?;
+    append_run_record_field(
+        run_record_path,
+        "target_run_elapsed_seconds_including_build",
+        &elapsed_seconds.to_string(),
+    )?;
+    append_exit_status_to_run_record(run_record_path, target_run_step.step_key, target_run_status)?;
+    writeln!(
+        wizard_output,
+        "\n  the program ended ({}) after {} s, including the build",
+        exit_status_text(target_run_status),
+        elapsed_seconds
+    )
+    .map_err(wizard_output_error)?;
+
+    // Step 5: work units (only if the config names a work unit).
+    let work_unit_count = match &config.work_unit_name {
+        None => None,
+        Some(work_unit_name) => {
+            let question_text = format!(
+                "How many {} in this run? (whole number; empty to skip)",
+                work_unit_name.wun_get()?
+            );
+            let rule_hint = format!("a whole number from 1 to {}, or empty", MAX_WORK_UNITS);
+            let answered_count = ask_until_valid(
+                wizard_input,
+                wizard_output,
+                &question_text,
+                None,
+                &rule_hint,
+                parse_optional_work_unit_count_answer,
+            )?;
+            match &answered_count {
+                Some(count) => append_run_record_field(
+                    run_record_path,
+                    "work_units",
+                    &count.wuc_get()?.to_string(),
+                )?,
+                None => append_run_record_field(run_record_path, "work_units_given", "false")?,
+            }
+            answered_count
+        }
+    };
+
+    // Step 6: LCOV export.
+    let export_step = ExternalCommandStep {
+        step_key: "lcov_export",
+        program_name: CARGO_PROGRAM_NAME,
+        program_arguments: lcov_export_command_arguments(planned_run),
+        working_directory: &crate_directory,
+        declined_code: HeatmapError::WizLcovExportDeclined,
+        start_failed_code: HeatmapError::WizLcovExportStartFailed,
+    };
+    let export_question = if target_run_status.success() {
+        "Run this command?"
+    } else {
+        "The program did not exit with code 0, so coverage data may be missing. Export anyway?"
+    };
+    confirm_external_command_step(
+        wizard_input,
+        wizard_output,
+        run_record_path,
+        &export_step,
+        export_question,
+    )?;
+    let export_status = run_external_command_step(wizard_output, &export_step)?;
+    append_exit_status_to_run_record(run_record_path, export_step.step_key, export_status)?;
+    if !export_status.success() {
+        writeln!(
+            wizard_output,
+            "  export failed: {}",
+            exit_status_text(export_status)
+        )
+        .map_err(wizard_output_error)?;
+        return Err(HeatmapError::WizLcovExportExitedWithFailure);
+    }
+
+    // Step 7: analysis inside this process (one validation path).
+    let analysis_arguments = analysis_command_arguments(planned_run, work_unit_count)?;
+    writeln!(
+        wizard_output,
+        "\n  analysis (inside this HIX process):\n    {}",
+        command_display_text(
+            ANALYSIS_PROGRAM_NAME,
+            analysis_arguments.get(1..).unwrap_or(&[])
+        )
+    )
+    .map_err(wizard_output_error)?;
+    wizard_output.flush().map_err(wizard_output_error)?;
+    let analysis_result = parse_cli_arguments(analysis_arguments.into_iter())
+        .and_then(|analysis_configuration| run_heatmap_with_configuration(&analysis_configuration));
+    if let Err(error_code) = analysis_result {
+        append_run_record_field(
+            run_record_path,
+            "analysis_error_code",
+            &error_code.code().to_string(),
+        )?;
+        writeln!(
+            wizard_output,
+            "  analysis failed (HIX code {})",
+            error_code.code()
+        )
+        .map_err(wizard_output_error)?;
+        return Err(error_code);
+    }
+    append_run_record_field(
+        run_record_path,
+        "analysis_folder",
+        &quoted_run_record_text(&planned_run.analysis_folder_path.to_string_lossy()),
+    )?;
+
+    // Step 8: demangle (optional; declining it still completes the run).
+    if config.demangle_outputs {
+        writeln!(wizard_output, "\n  demangle:").map_err(wizard_output_error)?;
+        if ask_yes_no(
+            wizard_input,
+            wizard_output,
+            "Write demangled copies of the report and TSV now?",
+        )? {
+            demangle_file_with_rustfilt(
+                wizard_output,
+                &planned_run.report_file_path,
+                &planned_run.demangled_report_file_path,
+                REPORT_DEMANGLE_CODES,
+                run_record_path,
+                "demangle_report",
+            )?;
+            demangle_file_with_rustfilt(
+                wizard_output,
+                &planned_run.sites_tsv_file_path,
+                &planned_run.demangled_sites_tsv_file_path,
+                SITES_TSV_DEMANGLE_CODES,
+                run_record_path,
+                "demangle_sites_tsv",
+            )?;
+        } else {
+            append_run_record_field(run_record_path, "demangle_declined", "true")?;
+        }
+    }
+
+    append_run_record_field(
+        run_record_path,
+        "run_completed_unix_seconds",
+        &current_unix_seconds()?.to_string(),
+    )?;
+    writeln!(
+        wizard_output,
+        "\nRun complete.\n  run folder: {}\n  analysis:   {}\n  run record: {}",
+        planned_run.run_folder_path.display(),
+        planned_run.analysis_folder_path.display(),
+        planned_run.run_record_path.display()
+    )
+    .map_err(wizard_output_error)?;
     Ok(())
 }
 
@@ -8614,7 +9790,7 @@ fn write_planned_run_steps<W: Write>(
 ///
 /// Test names: `<area>_<function>_<condition>[_with_code_<nnn>]`.
 /// Areas: `cli`, `type`, `lcov`, `src` (loop scan), `ana` (analysis),
-/// `rpt` (report output), `cfg` (config files), `err` (error-code policy),
+/// `rpt` (report output), `cfg` (config files), `wiz` (wizard), `err` (error-code policy),
 /// `guard` (single-source-of-truth checks on the source text itself).
 /// `unwrap`/`assert!`/indexing are allowed here (test mode).
 #[cfg(test)]
@@ -10898,5 +12074,299 @@ fn idle() {}\n";
         assert!(!base_directory.join(MODELING_DATA_DIRECTORY_NAME).exists());
         assert!(!base_directory.join(CONFIG_FILES_DIRECTORY_NAME).exists());
         fs::remove_dir(&base_directory).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Wizard, Stage 2
+    // ------------------------------------------------------------------
+
+    /// A planned run in a new temp base directory, with its config file
+    /// written to `config_files/` (so the run-folder copy can be made).
+    /// Returns the base directory (for cleanup) and the plan (run number 7).
+    fn temp_planned_run(test_label: &str) -> (PathBuf, PlannedRun) {
+        let base_directory = unique_temp_path(test_label);
+        let modeling_directory = base_directory.join(MODELING_DATA_DIRECTORY_NAME);
+        let config_directory = base_directory.join(CONFIG_FILES_DIRECTORY_NAME);
+        fs::create_dir(&base_directory).unwrap();
+        fs::create_dir(&modeling_directory).unwrap();
+        fs::create_dir(&config_directory).unwrap();
+        let config = sample_config(None);
+        let config_file_name = config_file_name_for_scenario(&config.scenario_name).unwrap();
+        write_new_config_file(
+            &AbsolutePath::ap_new(config_directory.join(&config_file_name)).unwrap(),
+            &config,
+        )
+        .unwrap();
+        let planned_run = plan_run(
+            config,
+            &config_directory,
+            &config_file_name,
+            7,
+            &modeling_directory,
+        )
+        .unwrap();
+        (base_directory, planned_run)
+    }
+
+    /// Every planned path follows the folder layout:
+    /// `run_NNN_<scenario>/<run>.lcov`, `analysis_001_<purpose>/...`.
+    #[test]
+    fn wiz_plan_run_builds_folder_layout() {
+        let base = PathBuf::from("/abs/base");
+        let planned_run = plan_run(
+            sample_config(None),
+            &base.join("config_files"),
+            "hixtoml_pumpkin_world_spawn.toml",
+            7,
+            &base.join("modeling_data"),
+        )
+        .unwrap();
+        let run_folder = PathBuf::from("/abs/base/modeling_data/run_007_pumpkin_world_spawn");
+        assert_eq!(
+            planned_run.run_folder_name.rl_get().unwrap(),
+            "run_007_pumpkin_world_spawn"
+        );
+        assert_eq!(planned_run.run_folder_path, run_folder);
+        assert_eq!(
+            planned_run.lcov_file_path,
+            run_folder.join("run_007_pumpkin_world_spawn.lcov")
+        );
+        assert_eq!(
+            planned_run.analysis_folder_path,
+            run_folder.join("analysis_001_count_baseline")
+        );
+        assert_eq!(
+            planned_run.run_record_path,
+            run_folder.join(RUN_RECORD_FILE_NAME)
+        );
+        assert_eq!(
+            planned_run.config_copy_path,
+            run_folder.join("hixtoml_pumpkin_world_spawn.toml")
+        );
+        assert_eq!(
+            planned_run.demangled_sites_tsv_file_path,
+            run_folder
+                .join("analysis_001_count_baseline")
+                .join(DEMANGLED_SITES_TSV_FILE_NAME)
+        );
+    }
+
+    /// The in-process analysis arguments pass the manual parser unchanged:
+    /// paths, top_n, run label, and work units (only when a count is given).
+    #[test]
+    fn wiz_analysis_command_arguments_pass_manual_parser() {
+        let base = PathBuf::from("/abs/base");
+        let planned_run = plan_run(
+            sample_config(Some("chunks_generated")),
+            &base.join("config_files"),
+            "hixtoml_pumpkin_world_spawn.toml",
+            7,
+            &base.join("modeling_data"),
+        )
+        .unwrap();
+        let with_units =
+            analysis_command_arguments(&planned_run, Some(WorkUnitCount::wuc_new(1200).unwrap()))
+                .unwrap();
+        let configuration = parse_cli_arguments(with_units.into_iter()).unwrap();
+        assert_eq!(configuration.top_n.tnc_get().unwrap(), 15);
+        assert_eq!(
+            configuration.lcov_input_path.ap_get().unwrap(),
+            planned_run.lcov_file_path.as_path()
+        );
+        assert_eq!(
+            configuration.output_directory_path.ap_get().unwrap(),
+            planned_run.analysis_folder_path.as_path()
+        );
+        let run_metadata = &configuration.run_metadata;
+        assert_eq!(
+            run_metadata.run_label.as_ref().unwrap().rl_get().unwrap(),
+            "run_007_pumpkin_world_spawn"
+        );
+        let work_units = run_metadata.work_units.as_ref().unwrap();
+        assert_eq!(work_units.count.wuc_get().unwrap(), 1200);
+        assert_eq!(work_units.name.wun_get().unwrap(), "chunks_generated");
+
+        let without_units = analysis_command_arguments(&planned_run, None).unwrap();
+        let configuration = parse_cli_arguments(without_units.into_iter()).unwrap();
+        assert!(configuration.run_metadata.work_units.is_none());
+    }
+
+    /// Record text values: quotes, backslashes, and control characters
+    /// become `?`; other text (including non-ASCII) is kept.
+    #[test]
+    fn wiz_quoted_run_record_text_replaces_unstorable_characters() {
+        assert_eq!(
+            quoted_run_record_text("Fedora Linux 45 (Workstation)"),
+            "\"Fedora Linux 45 (Workstation)\""
+        );
+        assert_eq!(quoted_run_record_text("a\"b\\c\nd\te"), "\"a?b?c?d?e\"");
+        assert_eq!(quoted_run_record_text("caf\u{e9}"), "\"caf\u{e9}\"");
+    }
+
+    /// Run record: created once (a second create returns 732), lines read
+    /// back with the field reader, and appending to a missing file returns 733.
+    #[test]
+    fn wiz_run_record_create_append_read_back_with_codes_732_733() {
+        let directory = unique_temp_path("wiz_record");
+        fs::create_dir(&directory).unwrap();
+        let record_path = directory.join(RUN_RECORD_FILE_NAME);
+        create_run_record(&record_path).unwrap();
+        append_run_record_field(
+            &record_path,
+            "run_folder",
+            &quoted_run_record_text("run_001_x"),
+        )
+        .unwrap();
+        append_run_record_field(&record_path, "clean_exit_code", "0").unwrap();
+
+        let (value_buffer, value_length) =
+            read_single_line_field_from_toml_no_heap::<64>(&record_path, "run_folder").unwrap();
+        assert_eq!(&value_buffer[..value_length], b"run_001_x");
+        let (value_buffer, value_length) =
+            read_single_line_field_from_toml_no_heap::<16>(&record_path, "clean_exit_code")
+                .unwrap();
+        assert_eq!(&value_buffer[..value_length], b"0");
+
+        let error = create_run_record(&record_path).unwrap_err();
+        assert_eq!(error, HeatmapError::WizRunRecordCreateFailed);
+        assert_eq!(error.code(), 732);
+        let error = append_run_record_field(&directory.join("missing.toml"), "k", "1").unwrap_err();
+        assert_eq!(error, HeatmapError::WizRunRecordOpenFailed);
+        assert_eq!(error.code(), 733);
+
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A run folder is never reused: the second create returns 730.
+    #[test]
+    fn wiz_create_run_folder_twice_with_code_730() {
+        let directory = unique_temp_path("wiz_run_folder");
+        create_run_folder(&directory).unwrap();
+        let error = create_run_folder(&directory).unwrap_err();
+        assert_eq!(error, HeatmapError::WizRunFolderAppeared);
+        assert_eq!(error.code(), 730);
+        fs::remove_dir(&directory).unwrap();
+    }
+
+    /// Work-unit answers: empty skips; a valid number is kept; text is 756;
+    /// 0 is out of range (160, from the type).
+    #[test]
+    fn wiz_parse_optional_work_unit_count_answer_with_codes_756_160() {
+        assert!(parse_optional_work_unit_count_answer("").unwrap().is_none());
+        assert_eq!(
+            parse_optional_work_unit_count_answer("1200")
+                .unwrap()
+                .unwrap()
+                .wuc_get()
+                .unwrap(),
+            1200
+        );
+        let error = parse_optional_work_unit_count_answer("twelve").unwrap_err();
+        assert_eq!(error, HeatmapError::WizWorkUnitsNotANumber);
+        assert_eq!(error.code(), 756);
+        assert_eq!(
+            parse_optional_work_unit_count_answer("0").unwrap_err(),
+            HeatmapError::TypeWorkUnitsOutOfRange
+        );
+    }
+
+    /// A program that cannot exist returns the step's own start code (740
+    /// for clean) and a message; nothing else runs.
+    #[test]
+    fn wiz_run_external_command_step_missing_program_with_code_740() {
+        let working_directory = std::env::temp_dir();
+        let impossible_step = ExternalCommandStep {
+            step_key: "clean",
+            program_name: "hix_test_program_that_does_not_exist_7f3a",
+            program_arguments: Vec::new(),
+            working_directory: &working_directory,
+            declined_code: HeatmapError::WizCleanDeclined,
+            start_failed_code: HeatmapError::WizCleanStartFailed,
+        };
+        let mut wizard_output: Vec<u8> = Vec::new();
+        let error = run_external_command_step(&mut wizard_output, &impossible_step).unwrap_err();
+        assert_eq!(error, HeatmapError::WizCleanStartFailed);
+        assert_eq!(error.code(), 740);
+        assert!(
+            String::from_utf8(wizard_output)
+                .unwrap()
+                .contains("could not start")
+        );
+    }
+
+    /// Exit statuses are recorded as an exit code or as "ended by signal".
+    #[cfg(unix)]
+    #[test]
+    fn wiz_append_exit_status_to_run_record_code_and_signal() {
+        use std::os::unix::process::ExitStatusExt;
+        let directory = unique_temp_path("wiz_exit_status");
+        fs::create_dir(&directory).unwrap();
+        let record_path = directory.join(RUN_RECORD_FILE_NAME);
+        create_run_record(&record_path).unwrap();
+        append_exit_status_to_run_record(
+            &record_path,
+            "clean",
+            std::process::ExitStatus::from_raw(0),
+        )
+        .unwrap();
+        append_exit_status_to_run_record(
+            &record_path,
+            "target_run",
+            std::process::ExitStatus::from_raw(9),
+        )
+        .unwrap();
+        let record_text = fs::read_to_string(&record_path).unwrap();
+        assert!(record_text.contains("clean_exit_code = 0\n"));
+        assert!(record_text.contains("target_run_ended_by_signal = true\n"));
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// Answering n to "Run these steps now?" ends normally and creates nothing.
+    #[test]
+    fn wiz_execute_planned_run_declined_at_start_creates_nothing() {
+        let (base_directory, planned_run) = temp_planned_run("wiz_exec_not_now");
+        let mut wizard_input = Cursor::new(b"n\n".to_vec());
+        let mut wizard_output: Vec<u8> = Vec::new();
+        execute_planned_run(&mut wizard_input, &mut wizard_output, &planned_run, &[]).unwrap();
+        assert!(!planned_run.run_folder_path.exists());
+        assert!(
+            String::from_utf8(wizard_output)
+                .unwrap()
+                .contains("Not run.")
+        );
+        fs::remove_dir_all(&base_directory).unwrap();
+    }
+
+    /// Declining the clean step (no command runs) stops with 739; the run
+    /// folder, the record (header and the decline), and the config copy stay.
+    #[test]
+    fn wiz_execute_planned_run_declined_clean_with_code_739() {
+        let (base_directory, planned_run) = temp_planned_run("wiz_exec_decline_clean");
+        let tool_version_lines = vec![ToolVersionLine {
+            tool_label: "cargo-llvm-cov",
+            reported_line: String::from("cargo-llvm-cov 0.9.1"),
+        }];
+        let mut wizard_input = Cursor::new(b"y\nn\n".to_vec());
+        let mut wizard_output: Vec<u8> = Vec::new();
+        let error = execute_planned_run(
+            &mut wizard_input,
+            &mut wizard_output,
+            &planned_run,
+            &tool_version_lines,
+        )
+        .unwrap_err();
+        assert_eq!(error, HeatmapError::WizCleanDeclined);
+        assert_eq!(error.code(), 739);
+
+        assert!(planned_run.run_folder_path.is_dir());
+        assert!(planned_run.config_copy_path.is_file());
+        let record_text = fs::read_to_string(&planned_run.run_record_path).unwrap();
+        assert!(record_text.contains("hix_run_record_version = 1\n"));
+        assert!(record_text.contains("run_folder = \"run_007_pumpkin_world_spawn\"\n"));
+        assert!(record_text.contains("tool_cargo_llvm_cov = \"cargo-llvm-cov 0.9.1\"\n"));
+        assert!(record_text.contains("clean_declined = true\n"));
+        assert!(!record_text.contains("target_run"));
+
+        fs::remove_dir_all(&base_directory).unwrap();
     }
 }

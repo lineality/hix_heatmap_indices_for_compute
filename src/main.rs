@@ -18,6 +18,12 @@
 //! cargo install cargo-llvm-cov
 //! cargo install rustfilt
 //! ```
+//! ## Guided alternative: the wizard (run in the HIX crate directory)
+//! ```text
+//! cargo run --release -- --wizard
+//! ```
+//! Checks tools, sets up `modeling_data/` and `config_files/`, writes or
+//! picks a config file, and prints the commands for the next run.
 //!
 //! ## Folder naming (all run data lives in `modeling_data/`, which is git-ignored)
 //! - One folder per run of the target program: `modeling_data/run_NNN_<scenario>/`
@@ -137,7 +143,7 @@ Note: '--out-dir' must NOT already exist (HIX never overwrites: code 510). Use a
 ```
 cargo run --release -- \
   --lcov /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/run_005_pumpkin.lcov \
-  --out-dir /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_0012_distribution_shape \
+  --out-dir /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_0013_distribution_shape \
   --top-n 15
 ```
 
@@ -145,8 +151,8 @@ cargo run --release -- \
 
 TXT->x
 ```
-rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_0012_distribution_shape/hix_report.txt \
-        > /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_0012_distribution_shape/hix_report.demangled.txt
+rustfilt < /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_0013_distribution_shape/hix_report.txt \
+        > /home/oops/code/hix_heatmap_indices_for_compute/modeling_data/test_5/analysis_0013_distribution_shape/hix_report.demangled.txt
 ```
 
 TSV->
