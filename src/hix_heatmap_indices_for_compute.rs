@@ -445,6 +445,10 @@ pub enum HeatmapError {
     TypeAnalysisPurposeInvalid = 168,
     TypeAnalysisPurposeCorrupted = 169,
 
+    // In enum HeatmapError:
+    TypeCargoProfileNameInvalid = 170,   // TODO check this, ok?
+    TypeCargoProfileNameCorrupted = 171, // TODO check this, ok?
+
     // 200–299: LCOV input
     LcovOpenNotFound = 201,
     LcovOpenPermissionDenied = 202,
@@ -738,6 +742,8 @@ impl HeatmapError {
             | HeatmapError::TypeCargoBinaryNameCorrupted
             | HeatmapError::TypeAnalysisPurposeInvalid
             | HeatmapError::TypeAnalysisPurposeCorrupted
+            | HeatmapError::TypeCargoProfileNameInvalid    // TODO, ok?
+            | HeatmapError::TypeCargoProfileNameCorrupted  // TODO, ok?
             | HeatmapError::CfgPathNotAbsolute
             | HeatmapError::CfgPathValueNotStorable
             | HeatmapError::CfgPathValueCorrupted
@@ -922,6 +928,10 @@ impl std::fmt::Display for HeatmapError {
             HeatmapError::TypeLineNumberCorrupted => "SourceLineNumber failed validity recheck",
             HeatmapError::TypePathNotAbsolute => "path must be absolute",
             HeatmapError::TypePathCorrupted => "AbsolutePath failed validity recheck",
+
+            HeatmapError::TypeCargoProfileNameInvalid => "TypeCargoProfileNameInvalid", // TODO, ok?
+            HeatmapError::TypeCargoProfileNameCorrupted => "TypeCargoProfileNameInvalid", // TODO, ok?
+
             HeatmapError::LcovOpenNotFound => "lcov file not found",
             HeatmapError::LcovOpenPermissionDenied => "lcov file permission denied",
             HeatmapError::LcovOpenTransient => {
@@ -2491,7 +2501,9 @@ const CONFIG_KEY_WORK_UNIT_NAME: &str = "work_unit_name";
 const CONFIG_KEY_DEMANGLE_OUTPUTS: &str = "demangle_outputs";
 
 /// Number of config keys.
-const CONFIG_KEY_COUNT: usize = 9;
+const CONFIG_KEY_COUNT: usize = 10;
+
+const CONFIG_KEY_CARGO_PROFILE: &str = "cargo_profile";
 
 /// Every config key: checked for duplicates before any field is read.
 /// The test `cfg_render_config_file_text_writes_every_key_once` keeps this
@@ -2500,6 +2512,7 @@ const CONFIG_KEYS: [&str; CONFIG_KEY_COUNT] = [
     CONFIG_KEY_FORMAT_VERSION,
     CONFIG_KEY_TARGET_CRATE_PATH,
     CONFIG_KEY_TARGET_BINARY_NAME,
+    CONFIG_KEY_CARGO_PROFILE, // <-- Added
     CONFIG_KEY_MODELING_DATA_PATH,
     CONFIG_KEY_SCENARIO_NAME,
     CONFIG_KEY_ANALYSIS_PURPOSE,
@@ -2516,6 +2529,53 @@ const CONFIG_WRITE_OPEN_ERROR_CODES: OpenErrorCodes = OpenErrorCodes {
     already_exists: HeatmapError::CfgWriteOpenAlreadyExists,
     other: HeatmapError::CfgWriteOpenOther,
 };
+
+// ----------------------------------------------------------------------------
+// Cargo Profile Option (e.g. vs. --release)
+// ----------------------------------------------------------------------------
+
+const MAX_CARGO_PROFILE_NAME_BYTES: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoProfileName {
+    profile_name_text: String,
+}
+
+impl CargoProfileName {
+    pub fn cpn_new(candidate_text: &str) -> Result<Self, HeatmapError> {
+        if !is_valid_metadata_text(candidate_text, MAX_CARGO_PROFILE_NAME_BYTES) {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: invalid cargo profile name {:?} (1..={} of A-Z a-z 0-9 _ - .)",
+                HeatmapError::TypeCargoProfileNameInvalid.code(),
+                candidate_text,
+                MAX_CARGO_PROFILE_NAME_BYTES
+            );
+            return Err(HeatmapError::TypeCargoProfileNameInvalid);
+        }
+        Ok(Self {
+            profile_name_text: candidate_text.to_string(),
+        })
+    }
+
+    pub fn cpn_get(&self) -> Result<&str, HeatmapError> {
+        if !is_valid_metadata_text(&self.profile_name_text, MAX_CARGO_PROFILE_NAME_BYTES) {
+            #[cfg(all(debug_assertions, not(test)))]
+            debug_assert!(
+                false,
+                "HIX-{}: CargoProfileName corrupted",
+                HeatmapError::TypeCargoProfileNameCorrupted.code()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "HIX-{}: CargoProfileName recheck failed",
+                HeatmapError::TypeCargoProfileNameCorrupted.code()
+            );
+            return Err(HeatmapError::TypeCargoProfileNameCorrupted);
+        }
+        Ok(self.profile_name_text.as_str())
+    }
+}
 
 // ----------------------------------------------------------------------------
 // Name values (scenario, cargo binary, analysis purpose)
@@ -2898,6 +2958,8 @@ pub struct HixConfig {
     target_crate_path: ConfigFieldPath,
     /// Binary to run (`--bin`).
     target_binary_name: CargoBinaryName,
+    /// Cargo build profile specification
+    cargo_profile: CargoProfileName,
     /// Directory holding the `run_NNN_<scenario>` folders.
     modeling_data_path: ConfigFieldPath,
     /// Scenario: names the run folders and this config file.
@@ -2967,6 +3029,7 @@ fn write_config_lines<W: Write>(
     config_writer: &mut W,
     config: &HixConfig,
 ) -> Result<(), HeatmapError> {
+    // 1. Comments
     writeln!(
         config_writer,
         "# HIX config file (TOML subset: one `key = value` per line, top level only)."
@@ -2977,12 +3040,16 @@ fn write_config_lines<W: Write>(
         "# Written by HIX. Hand edits are allowed; values may not contain double quotes or backslashes."
     )
     .map_err(config_render_error)?;
+
+    // 2. Format version (MUST be the first key)
     writeln!(
         config_writer,
         "{} = {}",
         CONFIG_KEY_FORMAT_VERSION, CONFIG_FORMAT_VERSION
     )
     .map_err(config_render_error)?;
+
+    // 3. Target crate
     writeln!(
         config_writer,
         "{} = \"{}\"",
@@ -2990,6 +3057,8 @@ fn write_config_lines<W: Write>(
         config.target_crate_path.cfp_get()?
     )
     .map_err(config_render_error)?;
+
+    // 4. Target binary
     writeln!(
         config_writer,
         "{} = \"{}\"",
@@ -2997,6 +3066,17 @@ fn write_config_lines<W: Write>(
         config.target_binary_name.cbn_get()?
     )
     .map_err(config_render_error)?;
+
+    // 5. Cargo profile
+    writeln!(
+        config_writer,
+        "{} = \"{}\"",
+        CONFIG_KEY_CARGO_PROFILE,
+        config.cargo_profile.cpn_get()?
+    )
+    .map_err(config_render_error)?;
+
+    // 6. Modeling data path
     writeln!(
         config_writer,
         "{} = \"{}\"",
@@ -3004,6 +3084,8 @@ fn write_config_lines<W: Write>(
         config.modeling_data_path.cfp_get()?
     )
     .map_err(config_render_error)?;
+
+    // 7. Scenario Name
     writeln!(
         config_writer,
         "{} = \"{}\"",
@@ -3011,6 +3093,8 @@ fn write_config_lines<W: Write>(
         config.scenario_name.scn_get()?
     )
     .map_err(config_render_error)?;
+
+    // 8. (Sub-Topic) Analysis Purpose
     writeln!(
         config_writer,
         "{} = \"{}\"",
@@ -3018,6 +3102,8 @@ fn write_config_lines<W: Write>(
         config.analysis_purpose.apu_get()?
     )
     .map_err(config_render_error)?;
+
+    // 9.Top N results
     writeln!(
         config_writer,
         "{} = {}",
@@ -3025,6 +3111,8 @@ fn write_config_lines<W: Write>(
         config.top_n.tnc_get()?
     )
     .map_err(config_render_error)?;
+
+    // 10. Work-Unit Name
     if let Some(work_unit_name) = &config.work_unit_name {
         writeln!(
             config_writer,
@@ -3034,6 +3122,8 @@ fn write_config_lines<W: Write>(
         )
         .map_err(config_render_error)?;
     }
+
+    // 11. Demangle: Yes, No
     writeln!(
         config_writer,
         "{} = {}",
@@ -3419,6 +3509,11 @@ pub fn load_config_file(config_file_path: &AbsolutePath) -> Result<HixConfig, He
         CONFIG_KEY_TARGET_BINARY_NAME,
         CargoBinaryName::cbn_new,
     )?;
+    let cargo_profile = read_config_value::<_, _, CONFIG_SHORT_VALUE_BUFFER_BYTES>(
+        file_path,
+        CONFIG_KEY_CARGO_PROFILE,
+        CargoProfileName::cpn_new,
+    )?;
     let modeling_data_path = read_config_value::<_, _, MAX_CONFIG_PATH_BYTES>(
         file_path,
         CONFIG_KEY_MODELING_DATA_PATH,
@@ -3458,6 +3553,7 @@ pub fn load_config_file(config_file_path: &AbsolutePath) -> Result<HixConfig, He
     Ok(HixConfig {
         target_crate_path,
         target_binary_name,
+        cargo_profile,
         modeling_data_path,
         scenario_name,
         analysis_purpose,
@@ -7550,7 +7646,17 @@ pub fn run_wizard_cli() -> Result<(), HeatmapError> {
     let standard_output = std::io::stdout();
     let mut wizard_output = standard_output.lock();
 
-    writeln!(wizard_output, "HIX wizard\n==========\n\n[checks]").map_err(wizard_output_error)?;
+    // Clear screen for clean transition
+    print!("\x1B[2J\x1B[1;1H");
+
+    //     print!("| |()\\\\//    \n");
+    //     print!("| |||//\\\\    \n");
+
+    writeln!(
+        wizard_output,
+        "| |()\\\\//    HIX wizard\n| |||//\\\\    ==========\n\n[checks]"
+    )
+    .map_err(wizard_output_error)?;
     check_not_running_as_root_or_sudo(&mut wizard_output)?;
     let tool_version_lines = check_required_tools(&mut wizard_output)?;
     report_perf_event_paranoid(&mut wizard_output)?;
@@ -8403,7 +8509,7 @@ fn run_wizard_setup_dialog<R: BufRead, W: Write>(
         wizard_input,
         wizard_output,
         &format!(
-            "Use the current directory {} ?",
+            "Use the current directory {} ?\n (Normal anser is (y)es)\n",
             current_directory.display()
         ),
     )?;
@@ -8488,6 +8594,9 @@ fn choose_or_create_config<R: BufRead, W: Write>(
         .map_err(wizard_output_error)?;
         None
     } else {
+        // Clear screen for clean transition
+        print!("\x1B[2J\x1B[1;1H");
+
         writeln!(
             wizard_output,
             "\n[config files in {}]",
@@ -8568,14 +8677,22 @@ fn create_new_config<R: BufRead, W: Write>(
         "an absolute path to a directory containing Cargo.toml; at most {} bytes; no \" or \\",
         MAX_CONFIG_PATH_BYTES
     );
+
+    // Clear screen for clean transition
+    print!("\x1B[2J\x1B[1;1H");
+
     let target_crate_path = ask_until_valid(
         wizard_input,
         wizard_output,
-        "Absolute path of the crate to analyze (the directory with its Cargo.toml)",
+        "Enter absolute path to the crate you want to analyze (the directory containing Cargo.toml)\n",
         None,
         &crate_path_hint,
         parse_target_crate_answer,
     )?;
+
+    // Clear screen for clean transition
+    print!("\x1B[2J\x1B[1;1H");
+
     let target_binary_name = ask_until_valid(
         wizard_input,
         wizard_output,
@@ -8584,22 +8701,42 @@ fn create_new_config<R: BufRead, W: Write>(
         &name_rule_hint_text(MAX_CARGO_BINARY_NAME_BYTES),
         CargoBinaryName::cbn_new,
     )?;
+
+    print!("\x1B[2J\x1B[1;1H");
+
+    let cargo_profile = ask_until_valid(
+        wizard_input,
+        wizard_output,
+        "Enter cargo profile to use (--profile <NAME>), if none, enter: release)\n",
+        Some("release"), // Is this the default? TODO
+        &name_rule_hint_text(MAX_CARGO_PROFILE_NAME_BYTES),
+        CargoProfileName::cpn_new,
+    )?;
+
     let scenario_hint = format!(
         "{}; not already used by a config file",
         name_rule_hint_text(MAX_SCENARIO_NAME_BYTES)
     );
+
+    // Clear screen for clean transition
+    print!("\x1B[2J\x1B[1;1H");
+
     let scenario_name = ask_until_valid(
         wizard_input,
         wizard_output,
-        "Scenario name (names run folders and this config, e.g. pumpkin_world_spawn)",
+        "Enter a scenario name (a name for the run-folder (housing this config)) e.g. pumpkin_world_spawn\n",
         None,
         &scenario_hint,
         |answer_text| parse_new_scenario_answer(answer_text, config_directory),
     )?;
+
+    // Clear screen for clean transition
+    print!("\x1B[2J\x1B[1;1H");
+
     let analysis_purpose = ask_until_valid(
         wizard_input,
         wizard_output,
-        "Analysis purpose (names the analysis folder)",
+        "What is the analysis-purpose (this names the analysis sub-folder)\n",
         Some(DEFAULT_ANALYSIS_PURPOSE),
         &name_rule_hint_text(MAX_ANALYSIS_PURPOSE_BYTES),
         AnalysisPurpose::apu_new,
@@ -8631,6 +8768,7 @@ fn create_new_config<R: BufRead, W: Write>(
     let config = HixConfig {
         target_crate_path,
         target_binary_name,
+        cargo_profile,
         modeling_data_path,
         scenario_name,
         analysis_purpose,
@@ -8718,7 +8856,7 @@ fn write_planned_run_steps<W: Write>(
         "    {}",
         command_display_text(
             CARGO_PROGRAM_NAME,
-            &lcov_export_command_arguments(planned_run)
+            &lcov_export_command_arguments(planned_run)?
         )
     )
     .map_err(wizard_output_error)?;
@@ -8897,30 +9035,60 @@ fn clean_command_arguments() -> Vec<OsString> {
         OsString::from("--workspace"),
     ]
 }
+//
+// /// `cargo llvm-cov run --release --no-report --bin <name>` (arguments after `cargo`).
+// /// `Err(TypeCargoBinaryNameCorrupted)` from the name's recheck.
+// fn target_run_command_arguments(config: &HixConfig) -> Result<Vec<OsString>, HeatmapError> {
+//     Ok(vec![
+//         OsString::from("llvm-cov"),
+//         OsString::from("run"),
+//         OsString::from("--release"),
+//         OsString::from("--no-report"),
+//         OsString::from("--bin"),
+//         OsString::from(config.target_binary_name.cbn_get()?),
+//     ])
+// }
+//
+// /// `cargo llvm-cov report --release --lcov --output-path <lcov>` (arguments after `cargo`).
+// fn lcov_export_command_arguments(planned_run: &PlannedRun) -> Vec<OsString> {
+//     vec![
+//         OsString::from("llvm-cov"),
+//         OsString::from("report"),
+//         OsString::from("--release"),
+//         OsString::from("--lcov"),
+//         OsString::from("--output-path"),
+//         planned_run.lcov_file_path.clone().into_os_string(),
+//     ]
+// }
 
-/// `cargo llvm-cov run --release --no-report --bin <name>` (arguments after `cargo`).
-/// `Err(TypeCargoBinaryNameCorrupted)` from the name's recheck.
-fn target_run_command_arguments(config: &HixConfig) -> Result<Vec<OsString>, HeatmapError> {
-    Ok(vec![
-        OsString::from("llvm-cov"),
-        OsString::from("run"),
-        OsString::from("--release"),
-        OsString::from("--no-report"),
-        OsString::from("--bin"),
-        OsString::from(config.target_binary_name.cbn_get()?),
-    ])
+fn profile_arguments(profile: &str) -> Vec<OsString> {
+    if profile == "release" {
+        vec![OsString::from("--release")]
+    } else {
+        vec![OsString::from("--profile"), OsString::from(profile)]
+    }
 }
 
-/// `cargo llvm-cov report --release --lcov --output-path <lcov>` (arguments after `cargo`).
-fn lcov_export_command_arguments(planned_run: &PlannedRun) -> Vec<OsString> {
-    vec![
-        OsString::from("llvm-cov"),
-        OsString::from("report"),
-        OsString::from("--release"),
-        OsString::from("--lcov"),
-        OsString::from("--output-path"),
-        planned_run.lcov_file_path.clone().into_os_string(),
-    ]
+/// `cargo llvm-cov run [--release | --profile <name>] --no-report --bin <name>`
+fn target_run_command_arguments(config: &HixConfig) -> Result<Vec<OsString>, HeatmapError> {
+    let profile = config.cargo_profile.cpn_get()?;
+    let mut args = vec![OsString::from("llvm-cov"), OsString::from("run")];
+    args.extend(profile_arguments(profile));
+    args.push(OsString::from("--no-report"));
+    args.push(OsString::from("--bin"));
+    args.push(OsString::from(config.target_binary_name.cbn_get()?));
+    Ok(args)
+}
+
+/// `cargo llvm-cov report [--release | --profile <name>] --lcov --output-path <lcov>`
+fn lcov_export_command_arguments(planned_run: &PlannedRun) -> Result<Vec<OsString>, HeatmapError> {
+    let profile = planned_run.config.cargo_profile.cpn_get()?;
+    let mut args = vec![OsString::from("llvm-cov"), OsString::from("report")];
+    args.extend(profile_arguments(profile));
+    args.push(OsString::from("--lcov"));
+    args.push(OsString::from("--output-path"));
+    args.push(planned_run.lcov_file_path.clone().into_os_string());
+    Ok(args)
 }
 
 /// The analysis argument list, starting with `ANALYSIS_PROGRAM_NAME` (skipped
@@ -9525,6 +9693,9 @@ fn execute_planned_run<R: BufRead, W: Write>(
     planned_run: &PlannedRun,
     tool_version_lines: &[ToolVersionLine],
 ) -> Result<(), HeatmapError> {
+    // Clear screen for clean transition
+    print!("\x1B[2J\x1B[1;1H");
+
     writeln!(wizard_output).map_err(wizard_output_error)?;
     if !ask_yes_no(wizard_input, wizard_output, "Run these steps now?")? {
         writeln!(
@@ -9639,7 +9810,7 @@ fn execute_planned_run<R: BufRead, W: Write>(
         None => None,
         Some(work_unit_name) => {
             let question_text = format!(
-                "How many {} in this run? (whole number; empty to skip)",
+                "\n\nHow many {} in this run? (whole number; empty to skip)",
                 work_unit_name.wun_get()?
             );
             let rule_hint = format!("a whole number from 1 to {}, or empty", MAX_WORK_UNITS);
@@ -9663,11 +9834,14 @@ fn execute_planned_run<R: BufRead, W: Write>(
         }
     };
 
+    // Clear screen for clean transition
+    print!("\x1B[2J\x1B[1;1H");
+
     // Step 6: LCOV export.
     let export_step = ExternalCommandStep {
         step_key: "lcov_export",
         program_name: CARGO_PROGRAM_NAME,
-        program_arguments: lcov_export_command_arguments(planned_run),
+        program_arguments: lcov_export_command_arguments(planned_run)?,
         working_directory: &crate_directory,
         declined_code: HeatmapError::WizLcovExportDeclined,
         start_failed_code: HeatmapError::WizLcovExportStartFailed,
@@ -11228,6 +11402,7 @@ fn idle() {}\n";
             target_crate_path: ConfigFieldPath::cfp_new(Path::new("/home/user/code/Pumpkin"))
                 .unwrap(),
             target_binary_name: CargoBinaryName::cbn_new("pumpkin").unwrap(),
+            cargo_profile: CargoProfileName::cpn_new("release").unwrap(),
             modeling_data_path: ConfigFieldPath::cfp_new(Path::new(
                 "/home/user/code/hix_heatmap_indices_for_compute/modeling_data",
             ))
@@ -11451,6 +11626,7 @@ fn idle() {}\n";
             "hix_config_version = 1\n",
             "target_crate_path = \"/home/user/code/Pumpkin\"\n",
             "target_binary_name = \"pumpkin\"\n",
+            "cargo_profile = \"release\"\n",
             "modeling_data_path = \"/home/user/code/hix_heatmap_indices_for_compute/modeling_data\"\n",
             "scenario_name = \"pumpkin_world_spawn\"\n",
             "analysis_purpose = \"count_baseline\"\n",
@@ -11565,6 +11741,8 @@ fn idle() {}\n";
         let longest_config = HixConfig {
             target_crate_path: ConfigFieldPath::cfp_new(Path::new(&longest_path)).unwrap(),
             target_binary_name: CargoBinaryName::cbn_new(&"b".repeat(MAX_CARGO_BINARY_NAME_BYTES))
+                .unwrap(),
+            cargo_profile: CargoProfileName::cpn_new(&"p".repeat(MAX_CARGO_PROFILE_NAME_BYTES))
                 .unwrap(),
             modeling_data_path: ConfigFieldPath::cfp_new(Path::new(&longest_path)).unwrap(),
             scenario_name: ScenarioName::scn_new(&"s".repeat(MAX_SCENARIO_NAME_BYTES)).unwrap(),
@@ -11994,7 +12172,7 @@ fn idle() {}\n";
         // base: y; create dirs: y; crate; binary; scenario; purpose default;
         // top_n default; no work unit; demangle: n; write: y.
         let answers = format!(
-            "y\ny\n{}\npumpkin\nworld_spawn\n\n\n\nn\ny\n",
+            "y\ny\n{}\npumpkin\n\nworld_spawn\n\n\n\nn\ny\n",
             crate_directory.display()
         );
         let mut wizard_input = Cursor::new(answers.into_bytes());
@@ -12012,6 +12190,7 @@ fn idle() {}\n";
             DEFAULT_ANALYSIS_PURPOSE
         );
         assert_eq!(loaded.top_n.tnc_get().unwrap(), DEFAULT_TOP_N);
+        assert_eq!(loaded.cargo_profile.cpn_get().unwrap(), "release");
         assert!(loaded.work_unit_name.is_none());
         assert!(!loaded.demangle_outputs);
         assert!(output_text.contains("run_001_world_spawn"));
@@ -12037,6 +12216,7 @@ fn idle() {}\n";
         let config = HixConfig {
             target_crate_path: ConfigFieldPath::cfp_new(&base_directory.join("crate")).unwrap(),
             target_binary_name: CargoBinaryName::cbn_new("lines").unwrap(),
+            cargo_profile: CargoProfileName::cpn_new("release").unwrap(),
             modeling_data_path: ConfigFieldPath::cfp_new(&modeling_directory).unwrap(),
             scenario_name: ScenarioName::scn_new("cut_paste").unwrap(),
             analysis_purpose: AnalysisPurpose::apu_new("count_baseline").unwrap(),
