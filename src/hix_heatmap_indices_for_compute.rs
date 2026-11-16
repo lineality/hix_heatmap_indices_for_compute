@@ -8754,7 +8754,7 @@ fn create_new_config<R: BufRead, W: Write>(
     let work_unit_name = ask_until_valid(
         wizard_input,
         wizard_output,
-        "Work-unit name (e.g. chunks_generated; empty for none)",
+        "Give your 'work units' a descriptive name (e.g. trees_punched; empty for none)\n",
         None,
         &name_rule_hint_text(MAX_WORK_UNIT_NAME_BYTES),
         parse_optional_work_unit_name_answer,
@@ -8797,6 +8797,10 @@ fn create_new_config<R: BufRead, W: Write>(
             .map_err(wizard_output_error)?;
         return Err(HeatmapError::WizUserDeclinedConfigWrite);
     }
+
+    // Clear screen for clean transition
+    print!("\x1B[2J\x1B[1;1H");
+
     write_new_config_file(&config_file_path, &config)?;
     writeln!(wizard_output, "  written and checked: {}", config_file_name)
         .map_err(wizard_output_error)?;
@@ -9693,9 +9697,6 @@ fn execute_planned_run<R: BufRead, W: Write>(
     planned_run: &PlannedRun,
     tool_version_lines: &[ToolVersionLine],
 ) -> Result<(), HeatmapError> {
-    // Clear screen for clean transition
-    print!("\x1B[2J\x1B[1;1H");
-
     writeln!(wizard_output).map_err(wizard_output_error)?;
     if !ask_yes_no(wizard_input, wizard_output, "Run these steps now?")? {
         writeln!(
@@ -9743,6 +9744,10 @@ fn execute_planned_run<R: BufRead, W: Write>(
         &clean_step,
         "Run this command?",
     )?;
+
+    // Clear screen for clean transition
+    print!("\x1B[2J\x1B[1;1H");
+
     let clean_status = run_external_command_step(wizard_output, &clean_step)?;
     append_exit_status_to_run_record(run_record_path, clean_step.step_key, clean_status)?;
     if !clean_status.success() {
