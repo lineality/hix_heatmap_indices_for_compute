@@ -1,13 +1,22 @@
 # HIX Heatmap Indices for Compute (Project Outline)
-*"Somebody wakeup HIX."*
+*"Somebody wake up HIX."*
 
 ##### 2026.11.01-... Geoffrey Gordon Ashbrook
+
+```
+| |()\\//
+| |||//\\
+```
+https://github.com/lineality/hix_heatmap_indices_for_compute 
+
+#### performance-behavior analysis tools and practices for design-performance improvement
 
 ### Liebig-Barrel, Time, Memory, Behavior, Code, Compilation, Compute, Riparian Data, Physical Modeling
 
 hix_heatmap_indices_for_compute.rs
 hix.exe
 
+Software DFM (design for manufacture - for software)
 
 
 
@@ -146,6 +155,29 @@ Three dimensions for planning/specifying contexts and priorities:
 - Cold
 - Tepid
 - Bi-polar
+
+
+## "Debugger"s, Bugs, Features and Tradeoffs: Compile-Time & Run-Time "Error"/Bug Debugging vs. Performance/Design "Error" "Debugging"
+
+From GDB to the Rad-Debugger (and from the history of terms such as 'bug' and 'breakpoint' going back to the Eniac-6 (https://www.amazon.com/Proving-Ground-Untold-Programmed-Computer/dp/B09KK1QHKM/), the topic of debugging seems to be generally neglected (as in tools for debugging and education about it) and perhaps overly ambiguous: Does, or should, the term 'debug' and 'debugger' refer to Design-Performance-Behavior analysis (e.g.) assuming that the overt 'this does not compile' and 'this does not run' issues have been found and removed? 
+
+Is there overlap or not-overlap between, e.g. Hollzmans's discussion of "static analysis" (for compile-time & run-time "error" issues) be 
+
+A. clearly separated / demarcated from
+B. interfaced with
+C. completely interdigitated with
+
+The need for [and need for tools for] (what seems to be parallel vocabulary and tools for) static analysis (tools), performance (e.g. critical-systems) audits & transparency, memory-behavior management tools and mechanisms, and "debugging' tools for Performance/Design issues (vs. compile-time & run-time "error" issues)?
+
+At time of writing, I have no idea. Is hix clearly a 'debugger' or clearly not a 'debugger'? 
+
+e.g. See: Ryan Fleury & Casey Muratori on history of Debuggers:
+https://www.youtube.com/watch?v=UzD_Ze6zFKA 
+
+As I was taught by Prof. Skip Ellis, how a program/system performs is entirely material to the question of whether it is pragmatically functional in the real world; i.e. a lack of design-performance is equivalent to an error that prevents use and functioning.
+
+Generally in the mid-late 2020s, (while many are recreationally hype-farming about "AI") there is a notable absence of design-performance and performance-behavior analysis tools or practices across all areas of systems and software development that I am aware of (which does not mean everywhere).
+
 
 
 ### ~Types of Analysis
@@ -636,7 +668,10 @@ Note: This sort of analysis mixed with repeatable input fuzzing might be useful 
 6. per-line analysis is not anticipated (that might go along with only within specific regions within functions/loops, which is all future scope)
 7. Free ice cream and ponies for everybody, forever. (out of scope, currently)
 
-
+Note: Fedora update 2026 11 10th: Perf: 'The 7.3.3 stable kernel rebase contains new features, improved hardware support, and a number of important fixes across the tree.'
+https://github.com/perfwiki/main 
+https://perfwiki.github.io/main/ 
+https://packages.fedoraproject.org/pkgs/kernel/perf/fedora-45-updates.html 
 
 
 ## "Threads": terms and phrases to work into docs, naming
@@ -664,3 +699,59 @@ Note: This sort of analysis mixed with repeatable input fuzzing might be useful 
 - UMA
 - CSVDB
 - tunnels
+
+
+# TODO:
+```
+Next features, in order (some probably already done) (suggested by Claude, so they are likely only approximately real)
+```
+| # | Feature | Basic steps |
+|---|---|---|
+| 3 | **POC-1.2-C: run metadata** | Add `--run-label`, `--run-duration-secs`, `--work-units` and `--work-unit-name`, and print them in provenance. When duration and work units are both given, show work units per minute. When work units are given, add an appended TSV column `count_per_work_unit`. Raise `MAX_CLI_FLAG_PAIRS` from 3 to 7; its guard test fails otherwise. |
+| 4 | **POC-1.2-E: distribution shape, marked experimental** | Add a report-only section for functions and loops, with no TSV change: Gini coefficient, top-1 and top-10 share, largest empty-decade gap, largest rank-to-rank drop. |
+| 6 | **Fresh scenario runs** (you) | New data in new `run_NNN_<scenario>` folders, each with its label, duration and work units written down. |
+| 7 | **POC-2a: self time from `perf`** | Re-verify perf and mangled-name behavior on the fresh builds. Parse `perf script` text with std only, sum the sample periods per function, join onto the count data, and report unmatched and "high count, no own samples" functions. |
+| 8 | **POC-2b: inclusive time** | Add frame-pointer call chains and inclusive time per function. |
+| 9 | **Wizard** (`wizard_cli_module.rs`), right after POC-2 | Tool checks, a saved config file, and automatic run folders. |
+| 10 | **POC-3: quadrant report** | Count against time-per-call, Top-N per quadrant, summary figures only for low/low. |
+
+```
+
+Notes:
+1. Double check addition of option for --profile release-{} 
+
+2. The term 'replay' if used, must be more clear between different things:
+A. calling up a config in the wizard
+B. cli 'replay' for automated (re)run, still with manual user-use of the application being tested
+ 
+
+
+3. formatting: when users answer these
+```
+Scenario name (names run folders and this config, e.g. pumpkin_world_spawn): pumpkin_test_wiz_1
+Analysis purpose (names the analysis folder) [count_baseline]: world_gen_
+```
+probably replace spaces with _ underscore and trip front-back spaces (maybe for all to lower-case too)
+
+(or not allow answers with spaces; retry)
+
+
+
+4. in the wizard,
+```
+cargo llvm-cov run --release --no-report --bin pumpkin
+```
+
+the phrase "--no-report" is potentially confusing. It is probably a cargo llvm-cov command, not related to HIX, but there should be a note about this.
+
+
+
+issue, maybe issue with pumpkin, terminal freezes after using stop (but not if using cancel...)
+
+
+see:
+/home/oops/code/hix_heatmap_indices_for_compute/modeling_data/run_007_est_2/analysis_001_run_ctrl_c_exit
+
+
+| |()\\//
+| |||//\\
